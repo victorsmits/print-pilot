@@ -15,6 +15,13 @@
       "when": 1787254735738,
       "tag": "0001_mature_silver_sable",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787257019396,
+      "tag": "0002_swift_harpoon",
+      "breakpoints": true
     }
   ]
 }

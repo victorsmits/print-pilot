@@ -1,0 +1,1 @@
+ALTER TABLE `filaments` ADD `price_per_kg` real;

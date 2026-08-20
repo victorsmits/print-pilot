@@ -10,6 +10,7 @@ export const filaments = sqliteTable("filaments", {
     colorHex: text("color_hex"),
     spoolWeightG: real("spool_weight_g"),
     remainingG: real("remaining_g"),
+    pricePerKg: real("price_per_kg"),
     lotNumber: text("lot_number"),
     openedAt: text("opened_at"),
     storageLocation: text("storage_location"),

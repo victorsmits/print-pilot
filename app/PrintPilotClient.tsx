@@ -3,6 +3,7 @@
 import { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import AccountPanel from "./AccountPanel";
 import InventoryPanel from "./InventoryPanel";
+import { buildCrealityProject } from "./threeMfExport";
 
 type Vec3 = [number, number, number];
 type Triangle = { a: Vec3; b: Vec3; c: Vec3; normal: Vec3; area: number };
@@ -11,7 +12,9 @@ type MeshStats = {
   triangles: Triangle[];
   size: Vec3;
   volumeCm3: number;
+  surfaceAreaMm2: number;
   overhangPercent: number;
+  overhangAreaMm2: number;
   baseScore: number;
   orientation: string;
   orientationNote: string;
@@ -42,6 +45,7 @@ export type InventoryFilament = {
   colorHex?: string | null;
   spoolWeightG?: number | null;
   remainingG?: number | null;
+  pricePerKg?: number | null;
   lotNumber?: string | null;
   openedAt?: string | null;
   storageLocation?: string | null;
@@ -126,6 +130,21 @@ const SETTINGS_HELP = {
 };
 type HelpKey = keyof typeof SETTINGS_HELP;
 
+const CRITERIA_HELP = {
+  visibleTop: { title: "Face supérieure visible", text: "Une surface orientée vers le haut que l’on verra pendant l’usage normal : dessus d’un couvercle, tablette, plaque avec texte ou sommet plat d’une boîte.", decide: "Coche Oui si l’aspect du dessus compte. Laisse Non si le dessus est caché, interne, sous une autre pièce ou sans importance esthétique." },
+  loadDirection: { title: "Direction de l’effort", text: "Indique dans quel sens la pièce sera tirée, pliée ou serrée. Une pièce est généralement plus fragile entre les couches, donc dans l’axe Z.", decide: "Imagine la force principale en service. Si elle cherche à séparer les couches, choisis Z ; si elle agit dans une couche, choisis XY." },
+  priority: { title: "Priorité du projet", text: "Détermine le compromis dominant entre état de surface, durée d’impression, quantité de matière et résistance.", decide: "Choisis ce qui ferait échouer le projet : une surface médiocre, un délai trop long ou une pièce trop faible." },
+  precision: { title: "Précision souhaitée", text: "Concerne la finesse des couches et la restitution des petits détails, pas la précision absolue d’un trou ou d’un assemblage.", decide: "Fine pour texte et courbes visibles ; Standard pour la majorité des pièces ; Large pour un brouillon rapide." },
+  shapeClass: { title: "Forme globale", text: "Décrit la famille géométrique du modèle et aide à choisir le type de support, l’adhérence et les vitesses prudentes.", decide: "Choisis la forme dominante. Une boîte reste prismatique même si ses arêtes sont arrondies ; une figurine est organique." },
+  featureSize: { title: "Plus petit détail", text: "C’est la plus petite nervure, pointe, lettre, paroi ou rainure que tu souhaites réellement conserver.", decide: "Mesure dans la CAO si possible. Sous 0,6 mm, une buse de 0,4 mm peut ne déposer qu’une seule ligne ou supprimer le détail." },
+  environment: { title: "Environnement", text: "L’humidité, la température ambiante et l’exposition extérieure changent le choix du matériau avant même les réglages du slicer.", decide: "Choisis la situation la plus sévère que la pièce rencontrera régulièrement." },
+  exposure: { title: "Exposition particulière", text: "Précise le risque dominant : eau durable, chaleur ou UV. Le PLA peut ramollir à chaud et vieillir dehors.", decide: "Pense à l’usage réel : voiture au soleil = chaleur ; balcon = UV et humidité." },
+  fitType: { title: "Type d’ajustement", text: "Indique si deux pièces doivent coulisser, se clipser, être serrées ou si un trou doit respecter une cote.", decide: "Si une autre pièce doit entrer dedans ou dessus, choisis l’ajustement le plus proche et prévois une éprouvette de jeu." },
+  supportAccess: { title: "Accès aux supports", text: "Décrit la facilité avec laquelle une pince ou les doigts pourront atteindre les supports après impression.", decide: "Une zone sous une figurine est accessible ; un tunnel fermé ou l’intérieur d’une cavité profonde ne l’est pas." },
+  undersideFinish: { title: "Qualité du dessous", text: "Une face imprimée sur support est généralement plus rugueuse. Une interface dense l’améliore, mais colle davantage.", decide: "Demande une face propre seulement si elle restera visible ou doit s’ajuster à une autre pièce." },
+} as const;
+type CriteriaHelpKey = keyof typeof CRITERIA_HELP;
+
 function sub(a: Vec3, b: Vec3): Vec3 { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
 function cross(a: Vec3, b: Vec3): Vec3 { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
 function dot(a: Vec3, b: Vec3) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -156,32 +175,40 @@ function geometryForAxis(triangles: Triangle[], axis: 0 | 1 | 2, sign: 1 | -1) {
   const all = triangles.flatMap(t => [t.a, t.b, t.c]);
   const mins: Vec3 = [Infinity, Infinity, Infinity], maxs: Vec3 = [-Infinity, -Infinity, -Infinity];
   all.forEach(v => v.forEach((n, i) => { mins[i] = Math.min(mins[i], n); maxs[i] = Math.max(maxs[i], n); }));
-  const totalArea = triangles.reduce((s, t) => s + t.area, 0) || 1;
-  const supportArea = triangles.reduce((s, t) => s + (t.normal[axis] * sign < -0.55 ? t.area : 0), 0);
   const bed = sign === 1 ? mins[axis] : maxs[axis];
   const tolerance = Math.max(0.08, (maxs[axis] - mins[axis]) * 0.002);
+  const totalArea = triangles.reduce((s, t) => s + t.area, 0) || 1;
+  const supportNormalLimit = -Math.cos(30 * Math.PI / 180);
+  const supportArea = triangles.reduce((sum, t) => {
+    const liesOnBed = [t.a[axis], t.b[axis], t.c[axis]].every(value => Math.abs(value - bed) <= tolerance);
+    const facesDown = t.normal[axis] * sign < supportNormalLimit;
+    return sum + (!liesOnBed && facesDown ? t.area : 0);
+  }, 0);
   const bedArea = triangles.reduce((s, t) => {
     const touches = [t.a[axis], t.b[axis], t.c[axis]].every(v => Math.abs(v - bed) <= tolerance);
     return s + (touches ? t.area * Math.abs(t.normal[axis]) : 0);
   }, 0);
   const other = ([0, 1, 2] as const).filter(i => i !== axis);
   const footprint = Math.max(1, (maxs[other[0]] - mins[other[0]]) * (maxs[other[1]] - mins[other[1]]));
-  return { axis, sign, support: supportArea / totalArea * 100, base: Math.min(100, bedArea / footprint * 100), height: maxs[axis] - mins[axis] };
+  return { axis, sign, support: supportArea / totalArea * 100, supportArea, base: Math.min(100, bedArea / footprint * 100), height: maxs[axis] - mins[axis] };
 }
 
-function analyseMesh(name: string, triangles: Triangle[]): MeshStats {
+export function analyseMesh(name: string, triangles: Triangle[]): MeshStats {
   if (!triangles.length) throw new Error("Le fichier ne contient aucun triangle exploitable.");
-  const points = triangles.flatMap(t => [t.a, t.b, t.c]);
+  const rawSignedVolume = triangles.reduce((s, t) => s + dot(t.a, cross(t.b, t.c)) / 6, 0);
+  const orientedTriangles = rawSignedVolume < 0 ? triangles.map(t => triangle(t.a, t.c, t.b)) : triangles;
+  const points = orientedTriangles.flatMap(t => [t.a, t.b, t.c]);
   const mins: Vec3 = [Infinity, Infinity, Infinity], maxs: Vec3 = [-Infinity, -Infinity, -Infinity];
   points.forEach(v => v.forEach((n, i) => { mins[i] = Math.min(mins[i], n); maxs[i] = Math.max(maxs[i], n); }));
   const size: Vec3 = [maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]];
-  const signedVolume = triangles.reduce((s, t) => s + dot(t.a, cross(t.b, t.c)) / 6, 0);
-  const candidates = ([0, 1, 2] as const).flatMap(axis => [geometryForAxis(triangles, axis, 1), geometryForAxis(triangles, axis, -1)]);
+  const signedVolume = orientedTriangles.reduce((s, t) => s + dot(t.a, cross(t.b, t.c)) / 6, 0);
+  const surfaceAreaMm2 = orientedTriangles.reduce((sum, t) => sum + t.area, 0);
+  const candidates = ([0, 1, 2] as const).flatMap(axis => [geometryForAxis(orientedTriangles, axis, 1), geometryForAxis(orientedTriangles, axis, -1)]);
   candidates.sort((a, b) => (a.support + a.height / 100 - a.base * 0.12) - (b.support + b.height / 100 - b.base * 0.12));
-  const current = geometryForAxis(triangles, 2, 1), best = candidates[0], labels = ["X", "Y", "Z"];
+  const current = geometryForAxis(orientedTriangles, 2, 1), best = candidates[0], labels = ["X", "Y", "Z"];
   const orientation = best.axis === 2 && best.sign === 1 ? "Orientation actuelle" : `${best.sign === -1 ? "Retourner puis " : ""}poser l’axe ${labels[best.axis]}`;
   const gain = Math.max(0, current.support - best.support);
-  return { name, triangles, size, volumeCm3: Math.abs(signedVolume) / 1000, overhangPercent: current.support, baseScore: current.base, orientation, orientationNote: gain > 2 ? `Estimation : environ ${gain.toFixed(1)} points de surface à supporter en moins.` : "L’orientation importée est déjà proche du meilleur compromis détecté." };
+  return { name, triangles: orientedTriangles, size, volumeCm3: Math.abs(signedVolume) / 1000, surfaceAreaMm2, overhangPercent: current.support, overhangAreaMm2: current.supportArea, baseScore: current.base, orientation, orientationNote: gain > 2 ? `Estimation : environ ${gain.toFixed(1)} points de surface à supporter en moins.` : "Le Z minimum du STL est posé sur le plateau ; cette orientation est déjà proche du meilleur compromis détecté." };
 }
 
 function fmt(n: number, digits = 0) { return Number.isFinite(n) ? n.toFixed(digits).replace(".", ",") : "—"; }
@@ -199,10 +226,12 @@ function ModelCanvas({ stats }: { stats: MeshStats | null }) {
     for (let x = 0; x < box.width + box.height; x += grid) { ctx.beginPath(); ctx.moveTo(x, box.height * .72); ctx.lineTo(x - box.height, box.height); ctx.stroke(); }
     if (!stats) { ctx.fillStyle = "rgba(211,226,216,.38)"; ctx.font = "600 13px ui-monospace"; ctx.textAlign = "center"; ctx.fillText("APERÇU DU MODÈLE", box.width / 2, box.height / 2 - 5); ctx.font = "12px system-ui"; ctx.fillStyle = "rgba(211,226,216,.22)"; ctx.fillText("Importe un STL pour commencer", box.width / 2, box.height / 2 + 18); return; }
     const tris = stats.triangles.length > 10000 ? stats.triangles.filter((_, i) => i % Math.ceil(stats.triangles.length / 10000) === 0) : stats.triangles;
+    const minZ = Math.min(...stats.triangles.flatMap(t => [t.a[2], t.b[2], t.c[2]]));
+    const bedTolerance = Math.max(0.08, stats.size[2] * 0.002);
     const [cx, cy, cz] = stats.size.map(v => v / 2) as Vec3;
     const scale = Math.min(box.width * .64 / Math.max(stats.size[0], stats.size[1], 1), box.height * .60 / Math.max(stats.size[2], stats.size[1], 1));
     const project = (v: Vec3) => { let x = v[0] - cx, y = v[1] - cy, z = v[2] - cz; const ca = Math.cos(rotation[1]), sa = Math.sin(rotation[1]); [x, z] = [x * ca + z * sa, -x * sa + z * ca]; const cb = Math.cos(rotation[0]), sb = Math.sin(rotation[0]); [y, z] = [y * cb - z * sb, y * sb + z * cb]; return [box.width / 2 + x * scale, box.height * .48 - y * scale, z] as const; };
-    tris.map(t => ({ t, z: (project(t.a)[2] + project(t.b)[2] + project(t.c)[2]) / 3 })).sort((a, b) => a.z - b.z).forEach(({ t }) => { const [a, b, c] = [project(t.a), project(t.b), project(t.c)]; const danger = t.normal[2] < -0.55; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.closePath(); ctx.fillStyle = danger ? "rgba(239,156,78,.30)" : "rgba(75,230,149,.30)"; ctx.fill(); ctx.strokeStyle = danger ? "rgba(239,156,78,.16)" : "rgba(129,240,180,.13)"; ctx.lineWidth = .55; ctx.stroke(); });
+    tris.map(t => ({ t, z: (project(t.a)[2] + project(t.b)[2] + project(t.c)[2]) / 3 })).sort((a, b) => a.z - b.z).forEach(({ t }) => { const [a, b, c] = [project(t.a), project(t.b), project(t.c)]; const onBed = [t.a[2], t.b[2], t.c[2]].every(value => Math.abs(value - minZ) <= bedTolerance); const danger = !onBed && t.normal[2] < -Math.cos(30 * Math.PI / 180); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.closePath(); ctx.fillStyle = danger ? "rgba(239,156,78,.30)" : "rgba(75,230,149,.30)"; ctx.fill(); ctx.strokeStyle = danger ? "rgba(239,156,78,.16)" : "rgba(129,240,180,.13)"; ctx.lineWidth = .55; ctx.stroke(); });
   }, [stats, rotation]);
   const down = (e: ReactPointerEvent<HTMLCanvasElement>) => { drag.current = { x: e.clientX, y: e.clientY, rx: rotation[0], ry: rotation[1] }; e.currentTarget.setPointerCapture(e.pointerId); };
   const move = (e: ReactPointerEvent<HTMLCanvasElement>) => { if (drag.current) setRotation([drag.current.rx + (e.clientY - drag.current.y) * .008, drag.current.ry + (e.clientX - drag.current.x) * .008]); };
@@ -223,6 +252,13 @@ function TutorialPanel({ item, onClose }: { item: HelpKey | null; onClose: () =>
 
 function Setting({ icon, label, value, onHelp }: { icon: string; label: string; value: string; onHelp: () => void }) { return <div className="setting"><span className="setting-icon">{icon}</span><span><small>{label}</small><b>{value}</b></span><button onClick={onHelp}>Où régler ?</button></div>; }
 
+function InfoTip({ item }: { item: CriteriaHelpKey }) {
+  const help = CRITERIA_HELP[item];
+  return <details className="info-tip" onClick={event => event.stopPropagation()}><summary aria-label={`Explication : ${help.title}`}>i</summary><div><b>{help.title}</b><p>{help.text}</p><span>Comment choisir</span><p>{help.decide}</p></div></details>;
+}
+
+function InfoLabel({ children, item }: { children: string; item: CriteriaHelpKey }) { return <span className="info-label">{children}<InfoTip item={item}/></span>; }
+
 export type AccountUser = { displayName: string; email: string } | null;
 
 export default function PrintPilotClient({ user }: { user: AccountUser }) {
@@ -231,7 +267,7 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
   const [environment, setEnvironment] = useState("inside"), [fitType, setFitType] = useState("none"), [supportAccess, setSupportAccess] = useState("easy"), [exposure, setExposure] = useState("normal");
   const [shapeClass, setShapeClass] = useState("prismatic"), [undersideFinish, setUndersideFinish] = useState("standard"), [featureSize, setFeatureSize] = useState("normal"), [nozzle, setNozzle] = useState("0.4");
   const [filamentId, setFilamentId] = useState(FILAMENTS[0].id), [printer, setPrinter] = useState("hi"), [mode, setMode] = useState<"balanced" | "quality" | "fast">("balanced"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
-  const [inventory, setInventory] = useState<InventoryFilament[]>(FILAMENTS), [inventoryOpen, setInventoryOpen] = useState(false), [inventoryLoading, setInventoryLoading] = useState(false), [accountOpen, setAccountOpen] = useState(false);
+  const [inventory, setInventory] = useState<InventoryFilament[]>(FILAMENTS), [inventoryOpen, setInventoryOpen] = useState(false), [inventoryLoading, setInventoryLoading] = useState(false), [accountOpen, setAccountOpen] = useState(false), [exportStatus, setExportStatus] = useState("");
   const inputRef = useRef<HTMLInputElement>(null), filament = inventory.find(f => f.id === filamentId) ?? inventory[0] ?? FILAMENTS[0];
 
   async function reloadInventory() {
@@ -278,7 +314,7 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     let walls = useCase === "functional" || priority === "strength" || useCase === "container" ? 4 : 3; if (mode === "fast") walls = Math.max(2, walls - 1);
     const infill = priority === "strength" || useCase === "functional" ? 25 : useCase === "container" ? 18 : fast ? 10 : 15, pattern = priority === "strength" ? "Gyroïde" : "Cubique adaptatif", supportRatio = mesh?.overhangPercent ?? 0;
     const base = PROFILE_BASES[layer] ?? PROFILE_BASES["0,20 mm"], layerMm = Number(layer.slice(0, 4).replace(",", "."));
-    const supportsEnabled = supportRatio >= 2 || shapeClass === "cavity" || shapeClass === "broad";
+    const supportsEnabled = Boolean(mesh && supportRatio >= 2 && mesh.overhangAreaMm2 >= 35);
     const treeSupport = shapeClass === "organic" || shapeClass === "tall";
     const supportType = treeSupport ? "Arborescents (auto)" : "Normaux (auto)";
     const supportStyle = treeSupport ? "Arborescents Organiques" : shapeClass === "broad" ? "Ajusté" : "Défaut";
@@ -300,7 +336,8 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     if (exposure === "heat" && filament.family.startsWith("PLA")) cautions.push("Risque thermique : le PLA peut se déformer dans une voiture, près d’une source chaude ou en plein soleil.");
     if (fitType !== "none") cautions.push("L’ajustement ne peut pas être garanti par une valeur universelle : imprime une petite éprouvette de jeu avant la pièce finale.");
     if (supportAccess === "closed" && supportRatio >= 2) cautions.push("Les supports seraient difficiles à retirer dans cette cavité : privilégie une autre orientation ou sépare la pièce.");
-    if (shapeClass === "cavity" && supportsEnabled) cautions.push("Une cavité fermée peut emprisonner les supports. Vérifie leur chemin de retrait ou coupe temporairement la pièce pour l’impression.");
+    if (shapeClass === "cavity") cautions.push(supportsEnabled ? "Une cavité fermée peut emprisonner les supports. Vérifie leur chemin de retrait ou coupe temporairement la pièce pour l’impression." : "La forme indique une cavité, mais elle n’active pas automatiquement les supports : vérifie les îlots après tranchage.");
+    if (shapeClass === "broad" && !supportsEnabled) cautions.push("Un large dessous plat posé sur le plateau n’a pas besoin de support ; surveille surtout l’adhérence et le gauchissement.");
     if (undersideFinish === "clean" && supportsEnabled) cautions.push("Une face inférieure propre exige une interface plus dense, mais elle peut devenir plus difficile à détacher : imprime un coupon de contact si la face est critique.");
     if (nozzle === "0.6") cautions.push("Les profils officiels détaillés affichés ci-dessous sont ceux de la buse 0,4 mm. La hauteur est adaptée, mais les vitesses doivent être validées avec ton profil 0,6 mm.");
     if (!filament.calibrated) cautions.push("Cette bobine n’est pas marquée comme calibrée : débit, pressure advance et débit volumique maximal restent à confirmer.");
@@ -308,6 +345,42 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     if (mesh && mesh.overhangPercent > 10) cautions.push("Beaucoup de faces descendantes détectées : tester l’orientation proposée avant d’ajouter des supports.");
     return { layer, walls, infill, pattern, support, supportPlan, brim, ironing, cautions, base };
   }, [mode, priority, precision, useCase, mesh, visibleTop, filament, printer, environment, exposure, fitType, supportAccess, shapeClass, undersideFinish, featureSize, nozzle]);
+  const estimate = useMemo(() => {
+    if (!mesh || mesh.volumeCm3 <= 0) return null;
+    const nozzleMm = Number(nozzle), layerMm = nozzle === "0.6" ? 0.3 : Number(recommendation.layer.match(/[\d,.]+/)?.[0].replace(",", ".") ?? "0.2");
+    const smallestDimension = Math.max(0.1, Math.min(...mesh.size.filter(value => value > 0)));
+    const shellThickness = Math.min(recommendation.walls * nozzleMm, smallestDimension * 0.45);
+    const shellCm3 = Math.min(mesh.volumeCm3 * 0.88, mesh.surfaceAreaMm2 * shellThickness / 1000);
+    const infillCm3 = Math.max(0, mesh.volumeCm3 - shellCm3) * recommendation.infill / 100;
+    const supportCm3 = recommendation.supportPlan.enabled ? Math.min(mesh.volumeCm3 * 0.25, mesh.overhangAreaMm2 * Math.min(mesh.size[2] * 0.22, 15) * 0.12 / 1000) : 0;
+    const brimCm3 = recommendation.brim.startsWith("Bordure") ? Math.max(mesh.size[0], mesh.size[1]) * 5 * layerMm / 1000 : 0;
+    const plasticCm3 = Math.max(0.05, shellCm3 + infillCm3 + supportCm3 + brimCm3);
+    const density = filament.family === "PETG" ? 1.27 : filament.family === "PLA Wood" ? 1.18 : 1.24;
+    const grams = plasticCm3 * density;
+    const profileFlow = ((recommendation.base.outer + recommendation.base.inner + recommendation.base.infill) / 3) * nozzleMm * layerMm;
+    const effectiveFlow = Math.max(0.8, Math.min(filament.maxVolumetricSpeed ?? (filament.family === "PETG" ? 10 : 12), profileFlow) * 0.52);
+    const layers = Math.max(1, mesh.size[2] / layerMm);
+    const hours = plasticCm3 * 1000 / effectiveFlow / 3600 * 1.18 + layers * 2.2 / 3600;
+    const lowHours = Math.max(0.05, hours * 0.75), highHours = hours * 1.35;
+    const materialCost = filament.pricePerKg != null ? grams * filament.pricePerKg / 1000 : null;
+    const energyCost = hours * 0.12 * 0.30;
+    return { grams, lowHours, highHours, materialCost, energyCost, totalCost: materialCost == null ? null : materialCost + energyCost };
+  }, [mesh, nozzle, recommendation, filament]);
+  function exportProject() {
+    if (!mesh) { setExportStatus("Importe d’abord un STL : le 3MF doit contenir une géométrie."); setStep(1); return; }
+    if (nozzle !== "0.4") { setExportStatus("L’export exact est disponible pour la buse 0,4 mm. Le profil officiel 0,6 mm sera ajouté ensuite."); return; }
+    const project = buildCrealityProject({
+      modelName: mesh.name,
+      triangles: mesh.triangles,
+      nozzle,
+      filament,
+      settings: { layer: recommendation.layer, walls: recommendation.walls, topLayers: recommendation.base.top, bottomLayers: recommendation.base.bottom, infill: recommendation.infill, infillPattern: recommendation.pattern, outerWallSpeed: recommendation.base.outer, innerWallSpeed: recommendation.base.inner, infillSpeed: recommendation.base.infill, topSpeed: recommendation.base.topSpeed, acceleration: recommendation.base.acceleration, brim: recommendation.brim, ironing: recommendation.ironing, support: recommendation.supportPlan },
+    });
+    const url = URL.createObjectURL(project.blob), anchor = document.createElement("a");
+    anchor.href = url; anchor.download = project.filename; anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    setExportStatus("3MF créé localement : ouvre-le dans Creality Print comme projet et contrôle l’aperçu avant impression.");
+  }
   async function loadFile(file: File) { setError(""); if (file.name.toLowerCase().endsWith(".3mf")) { setFileState("manual"); setMesh(null); setStep(2); return; } if (!file.name.toLowerCase().endsWith(".stl")) { setFileState("error"); setError("Format non reconnu. Utilise un fichier STL ou 3MF."); return; } try { setFileState("loading"); setMesh(analyseMesh(file.name, parseSTL(await file.arrayBuffer()))); setFileState("idle"); setStep(2); } catch (e) { setFileState("error"); setError(e instanceof Error ? e.message : "Impossible d’analyser ce fichier."); } }
   const choose = (e: ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) loadFile(file); }, drop = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); const file = e.dataTransfer.files?.[0]; if (file) loadFile(file); };
   return <main><TutorialPanel item={tutorial} onClose={() => setTutorial(null)} />
@@ -318,19 +391,19 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     <section className="hero" id="top"><div className="hero-copy"><span className="eyebrow">ASSISTANT PERSONNEL · CREALITY HI</span><h1>Le bon profil.<br/><em>Les bons supports.</em><br/>Avant d’imprimer.</h1><p>Importe une pièce, combine géométrie, usage et bobine réelle, puis obtiens une configuration expliquée — avec le chemin exact dans Creality Print.</p></div><div className="hero-metric"><span>Moteur de décision basé sur</span><b>GÉOMÉTRIE</b><b>USAGE</b><b>INVENTAIRE</b></div></section>
     <nav className="steps">{["Modèle", "Usage", "Filament", "Configuration"].map((label, i) => <button key={label} className={step === i + 1 ? "active" : step > i + 1 ? "done" : ""} onClick={() => setStep(i + 1)}><span>{step > i + 1 ? "✓" : String(i + 1).padStart(2, "0")}</span>{label}</button>)}</nav>
     <section className="workspace"><div className="stage">
-      {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : analyse automatique complète<br/>3MF : questionnaire guidé dans cette version</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>Glisser pour tourner</span></div></div></div><button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
+      {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : analyse automatique complète<br/>3MF : questionnaire guidé dans cette version</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>Glisser pour tourner</span></div><p className="orientation-assumption">Orientation analysée : axes du STL conservés, point Z le plus bas posé sur le plateau.</p></div></div><button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
       {step === 2 && <div className="step-panel">
         <Title step="02" title="À quoi servira la pièce ?" note="L’usage change davantage les réglages que la forme seule"/>
         <div className="choice-grid">{USES.map(u => <button key={u.id} className={`choice-card ${useCase === u.id ? "selected" : ""}`} onClick={() => setUseCase(u.id)}><span className="choice-radio"></span><b>{u.title}</b><small>{u.subtitle}</small></button>)}</div>
-        <div className="form-grid"><fieldset><legend>Priorité</legend><div className="segmented">{[["quality","Finition"],["balance","Équilibre"],["speed","Rapidité"],["strength","Solidité"]].map(([id,label]) => <button key={id} className={priority === id ? "active" : ""} onClick={() => setPriority(id)}>{label}</button>)}</div></fieldset><fieldset><legend>Précision souhaitée</legend><div className="segmented three">{[["fine","Fine"],["standard","Standard"],["rough","Large"]].map(([id,label]) => <button key={id} className={precision === id ? "active" : ""} onClick={() => setPrecision(id)}>{label}</button>)}</div></fieldset><label className="switch-row"><span><b>Face supérieure visible</b><small>Peut justifier le lissage</small></span><input type="checkbox" checked={visibleTop} onChange={e => setVisibleTop(e.target.checked)}/><i></i></label><label className="select-row"><span><b>Effort mécanique</b><small>Direction et intensité attendues</small></span><select value={loadDirection} onChange={e => setLoadDirection(e.target.value)}><option value="faible">Faible / décoratif</option><option value="xy">Principalement dans le plan XY</option><option value="z">Risque entre couches Z</option><option value="multi">Multidirectionnel</option></select></label></div>
+        <div className="form-grid"><fieldset><legend><InfoLabel item="priority">Priorité</InfoLabel></legend><div className="segmented">{[["quality","Finition"],["balance","Équilibre"],["speed","Rapidité"],["strength","Solidité"]].map(([id,label]) => <button key={id} className={priority === id ? "active" : ""} onClick={() => setPriority(id)}>{label}</button>)}</div></fieldset><fieldset><legend><InfoLabel item="precision">Précision souhaitée</InfoLabel></legend><div className="segmented three">{[["fine","Fine"],["standard","Standard"],["rough","Large"]].map(([id,label]) => <button key={id} className={precision === id ? "active" : ""} onClick={() => setPrecision(id)}>{label}</button>)}</div></fieldset><label className="switch-row"><span><b><InfoLabel item="visibleTop">Face supérieure visible</InfoLabel></b><small>Peut justifier le lissage</small></span><input type="checkbox" checked={visibleTop} onChange={e => setVisibleTop(e.target.checked)}/><i></i></label><label className="select-row"><span><b><InfoLabel item="loadDirection">Effort mécanique</InfoLabel></b><small>Direction et intensité attendues</small></span><select value={loadDirection} onChange={e => setLoadDirection(e.target.value)}><option value="faible">Faible / décoratif</option><option value="xy">Principalement dans le plan XY</option><option value="z">Risque entre couches Z</option><option value="multi">Multidirectionnel</option></select></label></div>
         <details className="advanced-criteria" open><summary>Critères avancés</summary><div className="criteria-grid">
-          <label><span>Forme globale</span><select value={shapeClass} onChange={e => setShapeClass(e.target.value)}><option value="prismatic">Mécanique / prismatique</option><option value="organic">Organique / figurine</option><option value="tall">Fine et haute</option><option value="broad">Large dessous plat</option><option value="cavity">Cavité ou tunnel interne</option></select></label>
-          <label><span>Plus petit détail</span><select value={featureSize} onChange={e => setFeatureSize(e.target.value)}><option value="normal">Supérieur à 1,2 mm</option><option value="fine">Entre 0,6 et 1,2 mm</option><option value="micro">Inférieur à 0,6 mm</option></select></label>
-          <label><span>Environnement</span><select value={environment} onChange={e => setEnvironment(e.target.value)}><option value="inside">Intérieur sec</option><option value="outside">Extérieur / balcon</option><option value="humid">Pièce humide</option></select></label>
-          <label><span>Exposition</span><select value={exposure} onChange={e => setExposure(e.target.value)}><option value="normal">Normale</option><option value="water">Eau / humidité durable</option><option value="heat">Chaleur / soleil</option><option value="uv">UV directs</option></select></label>
-          <label><span>Ajustement</span><select value={fitType} onChange={e => setFitType(e.target.value)}><option value="none">Aucun assemblage précis</option><option value="loose">Jeu libre</option><option value="sliding">Coulissant</option><option value="press">Serré / clipsé</option><option value="hole">Trou avec cote critique</option></select></label>
-          <label><span>Accès aux supports</span><select value={supportAccess} onChange={e => setSupportAccess(e.target.value)}><option value="easy">Facile après impression</option><option value="delicate">Face visible ou fragile</option><option value="closed">Cavité difficile d’accès</option></select></label>
-          <label><span>Qualité du dessous</span><select value={undersideFinish} onChange={e => setUndersideFinish(e.target.value)}><option value="standard">Standard</option><option value="clean">La plus propre possible</option><option value="removal">Retrait très facile</option></select></label>
+          <label><InfoLabel item="shapeClass">Forme globale</InfoLabel><select value={shapeClass} onChange={e => setShapeClass(e.target.value)}><option value="prismatic">Mécanique / prismatique</option><option value="organic">Organique / figurine</option><option value="tall">Fine et haute</option><option value="broad">Large dessous plat</option><option value="cavity">Cavité ou tunnel interne</option></select></label>
+          <label><InfoLabel item="featureSize">Plus petit détail</InfoLabel><select value={featureSize} onChange={e => setFeatureSize(e.target.value)}><option value="normal">Supérieur à 1,2 mm</option><option value="fine">Entre 0,6 et 1,2 mm</option><option value="micro">Inférieur à 0,6 mm</option></select></label>
+          <label><InfoLabel item="environment">Environnement</InfoLabel><select value={environment} onChange={e => setEnvironment(e.target.value)}><option value="inside">Intérieur sec</option><option value="outside">Extérieur / balcon</option><option value="humid">Pièce humide</option></select></label>
+          <label><InfoLabel item="exposure">Exposition</InfoLabel><select value={exposure} onChange={e => setExposure(e.target.value)}><option value="normal">Normale</option><option value="water">Eau / humidité durable</option><option value="heat">Chaleur / soleil</option><option value="uv">UV directs</option></select></label>
+          <label><InfoLabel item="fitType">Ajustement</InfoLabel><select value={fitType} onChange={e => setFitType(e.target.value)}><option value="none">Aucun assemblage précis</option><option value="loose">Jeu libre</option><option value="sliding">Coulissant</option><option value="press">Serré / clipsé</option><option value="hole">Trou avec cote critique</option></select></label>
+          <label><InfoLabel item="supportAccess">Accès aux supports</InfoLabel><select value={supportAccess} onChange={e => setSupportAccess(e.target.value)}><option value="easy">Facile après impression</option><option value="delicate">Face visible ou fragile</option><option value="closed">Cavité difficile d’accès</option></select></label>
+          <label><InfoLabel item="undersideFinish">Qualité du dessous</InfoLabel><select value={undersideFinish} onChange={e => setUndersideFinish(e.target.value)}><option value="standard">Standard</option><option value="clean">La plus propre possible</option><option value="removal">Retrait très facile</option></select></label>
         </div></details>
         <Actions back={() => setStep(1)} next={() => setStep(3)} nextLabel="Choisir le filament"/>
       </div>}
@@ -350,10 +423,12 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
           <div className="official-speeds"><span>VALEURS DU PROFIL CREALITY HI</span><b>Paroi ext. {recommendation.base.outer} mm/s</b><b>Paroi int. {recommendation.base.inner} mm/s</b><b>Surface sup. {recommendation.base.topSpeed} mm/s</b><b>Accélération {recommendation.base.acceleration} mm/s²</b></div>
           <div className="filament-tech"><span>BOBINE SÉLECTIONNÉE</span><b>{filament.label}</b><div><em>Buse</em><strong>{filament.nozzleTempMin != null || filament.nozzleTempMax != null ? `${filament.nozzleTempMin ?? "?"}–${filament.nozzleTempMax ?? "?"} °C` : "À compléter"}</strong></div><div><em>Plateau</em><strong>{filament.bedTempMin != null || filament.bedTempMax != null ? `${filament.bedTempMin ?? "?"}–${filament.bedTempMax ?? "?"} °C` : "À compléter"}</strong></div><div><em>Débit max.</em><strong>{filament.maxVolumetricSpeed != null ? `${filament.maxVolumetricSpeed} mm³/s` : "À calibrer"}</strong></div><div><em>PA / débit</em><strong>{filament.pressureAdvance != null || filament.flowRatio != null ? `${filament.pressureAdvance ?? "?"} / ${filament.flowRatio ?? "?"}` : "À calibrer"}</strong></div></div>
         </div><div className="support-card">
-          <div className="card-label"><span>ANALYSE DES SUPPORTS</span><b>{mesh ? "MESURÉE" : "ESTIMÉE"}</b></div><div className="support-score"><span>{mesh ? fmt(mesh.overhangPercent, 1) : "—"}<small>%</small></span><p>surface descendante<br/>potentiellement critique</p></div><div className="meter"><i style={{width: `${Math.min(100, mesh?.overhangPercent ?? 0)}%`}}></i></div><div className="support-verdict"><span className={!recommendation.supportPlan.enabled ? "ok" : "warn"}>{!recommendation.supportPlan.enabled ? "SANS SUPPORT PROBABLE" : "PLAN DE SUPPORT PROPOSÉ"}</span><h3>{mesh?.orientation ?? "Importe un STL pour l’analyse"}</h3><p>{mesh?.orientationNote ?? "Sans géométrie, la forme globale et l’accès renseignés déterminent un point de départ prudent."}</p></div>
+          <div className="card-label"><span>ANALYSE DES SUPPORTS</span><b>{mesh ? "ORIENTATION STL" : "À CONFIRMER"}</b></div><div className="support-score"><span>{mesh ? fmt(mesh.overhangPercent, 1) : "—"}<small>%</small></span><p>surface descendante hors plateau<br/>sous le seuil de 30°</p></div><div className="meter"><i style={{width: `${Math.min(100, mesh?.overhangPercent ?? 0)}%`}}></i></div><div className="support-verdict"><span className={!recommendation.supportPlan.enabled ? "ok" : "warn"}>{!recommendation.supportPlan.enabled ? "SANS SUPPORT PROBABLE" : "PLAN DE SUPPORT PROPOSÉ"}</span><h3>{mesh?.orientation ?? "Importe un STL pour l’analyse"}</h3><p>{mesh?.orientationNote ?? "Sans STL, PrintPilot ne décide plus d’activer les supports uniquement à partir d’une catégorie de forme."}</p></div>
           <div className="support-plan"><span>RÉGLAGES À REPORTER</span><dl><div><dt>Activer</dt><dd>{recommendation.supportPlan.enabled ? "Oui" : "Non"}</dd></div><div><dt>Type / style</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.type} · ${recommendation.supportPlan.style}` : "—"}</dd></div><div><dt>Angle de seuil</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.threshold}°` : "—"}</dd></div><div><dt>Sur plateau uniquement</dt><dd>{recommendation.supportPlan.enabled ? (recommendation.supportPlan.onPlateOnly ? "Oui" : "Non") : "—"}</dd></div><div><dt>Régions critiques seules</dt><dd>{recommendation.supportPlan.enabled ? (recommendation.supportPlan.criticalOnly ? "Oui" : "Non") : "—"}</dd></div><div><dt>Distance Z supérieure</dt><dd>{recommendation.supportPlan.enabled ? `${fmt(recommendation.supportPlan.topZ, 2)} mm` : "—"}</dd></div><div><dt>Distance support/objet XY</dt><dd>{recommendation.supportPlan.enabled ? `${fmt(recommendation.supportPlan.xy, 2)} mm` : "—"}</dd></div><div><dt>Interface supérieure</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.interfaceLayers} couches · ${fmt(recommendation.supportPlan.interfaceSpacing, 2)} mm` : "—"}</dd></div></dl></div>
           <div className="support-facts"><div><span>Contact plateau</span><b>{mesh ? `${fmt(mesh.baseScore)} / 100` : "—"}</b></div><div><span>Îlots</span><b>À valider au tranchage</b></div><div><span>Portée des ponts</span><b>Non mesurable sûrement depuis un STL seul</b></div></div><button className="secondary full" onClick={() => setTutorial("supports")}>Où régler les supports ?</button>
         </div></div>
+        <section className="estimate-card"><div><span>ESTIMATION AVANT TRANCHAGE</span><h3>Temps, matière et coût</h3></div>{estimate ? <div className="estimate-grid"><div><small>Durée probable</small><b>{fmt(estimate.lowHours, 1)}–{fmt(estimate.highHours, 1)} h</b></div><div><small>Filament estimé</small><b>{fmt(estimate.grams, 0)} g</b></div><div><small>Coût estimé</small><b>{estimate.totalCost == null ? "Prix/kg manquant" : `${fmt(estimate.totalCost, 2)} €`}</b></div></div> : <p>Importe un STL fermé pour calculer cette fourchette.</p>}<p className="estimate-note">Fourchette géométrique, pas un tranchage : coût = filament au prix/kg de la bobine + électricité estimée à 0,30 €/kWh et 120 W moyens. Creality Print reste la référence exacte.</p></section>
+        <section className="export-card"><div><span>PROJET PRÊT À OUVRIR</span><h3>Exporter le STL avec ces réglages</h3><p>Le modèle conserve son orientation, est centré sur le plateau de la Creality Hi et reçoit les paramètres conseillés dans le projet.</p></div><button className="primary" onClick={exportProject} disabled={!mesh || nozzle !== "0.4"}>Exporter le projet 3MF</button>{exportStatus && <p className="export-status">{exportStatus}</p>}<small>Export exact actuel : Creality Hi, buse 0,4 mm. Vérifie toujours l’aperçu couche par couche avant impression.</small></section>
         {recommendation.cautions.length > 0 && <div className="cautions">{recommendation.cautions.map(c => <p key={c}><b>À surveiller</b>{c}</p>)}</div>}
         <div className="reasoning"><b>Pourquoi cette configuration ?</b><p>{useCase === "functional" ? "La pièce est fonctionnelle : les parois portent l’essentiel de la résistance, avec un remplissage raisonnable." : "Le réglage suit ton usage et ta priorité."} {loadDirection === "z" ? "Le risque de rupture entre couches est signalé : réoriente la pièce avant d’augmenter simplement le remplissage." : "L’orientation reste le premier levier avant les supports et le remplissage."}</p></div>
       </div>}
