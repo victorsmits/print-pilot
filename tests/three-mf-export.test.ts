@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { buildCrealityProject } from "../app/threeMfExport";
 
@@ -23,4 +24,21 @@ const project = buildCrealityProject({
   },
 });
 
-await writeFile(process.argv[2], new Uint8Array(await project.blob.arrayBuffer()));
+const bytes = new Uint8Array(await project.blob.arrayBuffer());
+const archiveText = new TextDecoder().decode(bytes);
+
+assert.equal(project.filename, "cube-test_PrintPilot_v4_profil_complet_CrealityHi.3mf");
+assert.match(archiveText, /"print_settings_id": "0\.12mm Standard @Creality Hi 0\.4 nozzle"/);
+assert.match(archiveText, /"line_width": "0\.42"/);
+assert.match(archiveText, /"inner_wall_line_width": "0\.45"/);
+assert.match(archiveText, /"top_surface_line_width": "0\.42"/);
+assert.match(archiveText, /"seam_gap": "15%"/);
+assert.match(archiveText, /"staggered_inner_seams": "1"/);
+assert.match(archiveText, /"enable_prime_tower": "1"/);
+assert.match(archiveText, /"wall_loops": "4"/);
+assert.match(archiveText, /"sparse_infill_density": "25%"/);
+assert.match(archiveText, /"enable_support": "1"/);
+assert.doesNotMatch(archiveText, /Metadata\/process_settings_1\.config/);
+assert.doesNotMatch(archiveText, /Metadata\/filament_settings_1\.config/);
+
+if (process.argv[2]) await writeFile(process.argv[2], bytes);
