@@ -1,4 +1,56 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const filaments = sqliteTable("filaments", {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userEmail: text("user_email").notNull(),
+    brand: text("brand").notNull(),
+    productLine: text("product_line").notNull(),
+    material: text("material").notNull(),
+    colorName: text("color_name").notNull(),
+    colorHex: text("color_hex"),
+    spoolWeightG: real("spool_weight_g"),
+    remainingG: real("remaining_g"),
+    lotNumber: text("lot_number"),
+    openedAt: text("opened_at"),
+    storageLocation: text("storage_location"),
+    storageHumidity: real("storage_humidity"),
+    profileName: text("profile_name"),
+    nozzleTempMin: integer("nozzle_temp_min"),
+    nozzleTempMax: integer("nozzle_temp_max"),
+    bedTempMin: integer("bed_temp_min"),
+    bedTempMax: integer("bed_temp_max"),
+    maxVolumetricSpeed: real("max_volumetric_speed"),
+    flowRatio: real("flow_ratio"),
+    pressureAdvance: real("pressure_advance"),
+    dryingTemp: integer("drying_temp"),
+    dryingHours: real("drying_hours"),
+    cfsCompatible: integer("cfs_compatible", { mode: "boolean" }).notNull().default(true),
+    abrasive: integer("abrasive", { mode: "boolean" }).notNull().default(false),
+    calibrated: integer("calibrated", { mode: "boolean" }).notNull().default(false),
+    notes: text("notes"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+});
+
+export const printProjects = sqliteTable("print_projects", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userEmail: text("user_email").notNull(),
+  name: text("name").notNull(),
+  sourceFileName: text("source_file_name"),
+  filamentId: integer("filament_id").references(() => filaments.id),
+  criteriaJson: text("criteria_json").notNull(),
+  recommendationJson: text("recommendation_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const calibrations = sqliteTable("calibrations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userEmail: text("user_email").notNull(),
+  filamentId: integer("filament_id").notNull().references(() => filaments.id),
+  calibrationType: text("calibration_type").notNull(),
+  valuesJson: text("values_json").notNull(),
+  notes: text("notes"),
+  performedAt: text("performed_at").notNull(),
+  createdAt: text("created_at").notNull(),
+});

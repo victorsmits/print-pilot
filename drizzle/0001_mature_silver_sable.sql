@@ -1,0 +1,1 @@
+DROP INDEX `filaments_user_identity_idx`;
