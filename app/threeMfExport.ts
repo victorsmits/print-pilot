@@ -18,6 +18,7 @@ export type ExportFilament = {
   maxVolumetricSpeed?: number | null;
   flowRatio?: number | null;
   pressureAdvance?: number | null;
+  calibrated?: boolean;
 };
 
 export type CrealityProjectSettings = {
@@ -98,39 +99,48 @@ function infillPattern(value: string) {
 
 type ConfigRecord = Record<string, string | string[]>;
 
-function processValues(settings: CrealityProjectSettings, nozzle: string): Record<string, string> {
+/**
+ * Only settings for which PrintPilot has made an explicit recommendation.
+ * Everything else is inherited from the official Creality Hi process preset.
+ */
+function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle: string): Record<string, string> {
   const layer = nozzle === "0.6" ? 0.3 : layerNumber(settings.layer);
   const ironingEnabled = settings.ironing !== "Désactivé";
-  return {
+  const overrides: Record<string, string> = {
     layer_height: String(layer),
     wall_loops: String(settings.walls),
-    top_shell_layers: String(settings.topLayers),
-    bottom_shell_layers: String(settings.bottomLayers),
     sparse_infill_density: `${settings.infill}%`,
     sparse_infill_pattern: infillPattern(settings.infillPattern),
-    outer_wall_speed: String(settings.outerWallSpeed),
-    inner_wall_speed: String(settings.innerWallSpeed),
-    sparse_infill_speed: String(settings.infillSpeed),
-    top_surface_speed: String(settings.topSpeed),
-    default_acceleration: String(settings.acceleration),
     enable_support: settings.support.enabled ? "1" : "0",
-    support_type: supportType(settings.support.type),
-    support_style: supportStyle(settings.support.style),
-    support_threshold_angle: String(settings.support.threshold),
-    support_on_build_plate_only: settings.support.onPlateOnly ? "1" : "0",
-    support_critical_regions_only: settings.support.criticalOnly ? "1" : "0",
-    support_top_z_distance: String(settings.support.topZ),
-    support_object_xy_distance: String(settings.support.xy),
-    support_interface_top_layers: String(settings.support.interfaceLayers),
-    support_interface_spacing: String(settings.support.interfaceSpacing),
-    brim_type: settings.brim.startsWith("Bordure") ? "outer_only" : "auto_brim",
-    brim_width: "5",
-    ironing_type: ironingEnabled ? "top" : "no ironing",
-    ironing_pattern: "zig-zag",
-    ironing_speed: "30",
-    ironing_flow: "25%",
-    ironing_spacing: "0.15",
   };
+
+  if (settings.support.enabled) {
+    Object.assign(overrides, {
+      support_type: supportType(settings.support.type),
+      support_style: supportStyle(settings.support.style),
+      support_threshold_angle: String(settings.support.threshold),
+      support_on_build_plate_only: settings.support.onPlateOnly ? "1" : "0",
+      support_critical_regions_only: settings.support.criticalOnly ? "1" : "0",
+      support_top_z_distance: String(settings.support.topZ),
+      support_object_xy_distance: String(settings.support.xy),
+      support_interface_top_layers: String(settings.support.interfaceLayers),
+      support_interface_spacing: String(settings.support.interfaceSpacing),
+    });
+  }
+  if (settings.brim.startsWith("Bordure")) {
+    overrides.brim_type = "outer_only";
+    overrides.brim_width = "5";
+  }
+  if (ironingEnabled) {
+    Object.assign(overrides, {
+      ironing_type: "top",
+      ironing_pattern: "zig-zag",
+      ironing_speed: "30",
+      ironing_flow: "25%",
+      ironing_spacing: "0.15",
+    });
+  }
+  return overrides;
 }
 
 function embeddedNames(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament) {
@@ -142,26 +152,16 @@ function embeddedNames(modelName: string, settings: CrealityProjectSettings, fil
 }
 
 function filamentProjectValues(filament: ExportFilament): ConfigRecord {
-  const nozzleTemperature = filament.nozzleTempMax ?? filament.nozzleTempMin;
-  const bedTemperature = filament.bedTempMax ?? filament.bedTempMin;
   const config: ConfigRecord = {
     filament_type: [filamentType(filament.family)],
     filament_vendor: [filament.brand || "Generic"],
     filament_colour: [filament.colorHex || "#35D77D"],
   };
-  if (nozzleTemperature != null) {
-    config.nozzle_temperature = [String(nozzleTemperature)];
-    config.nozzle_temperature_initial_layer = [String(nozzleTemperature)];
-  }
-  if (bedTemperature != null) {
-    config.hot_plate_temp = [String(bedTemperature)];
-    config.hot_plate_temp_initial_layer = [String(bedTemperature)];
-    config.textured_plate_temp = [String(bedTemperature)];
-    config.textured_plate_temp_initial_layer = [String(bedTemperature)];
-  }
-  if (filament.maxVolumetricSpeed != null) config.filament_max_volumetric_speed = [String(filament.maxVolumetricSpeed)];
-  if (filament.flowRatio != null) config.filament_flow_ratio = [String(filament.flowRatio)];
-  if (filament.pressureAdvance != null) {
+  // A temperature range is not an exact printing temperature. Preserve the
+  // official filament preset until an explicit calibrated value is available.
+  if (filament.calibrated && filament.maxVolumetricSpeed != null) config.filament_max_volumetric_speed = [String(filament.maxVolumetricSpeed)];
+  if (filament.calibrated && filament.flowRatio != null) config.filament_flow_ratio = [String(filament.flowRatio)];
+  if (filament.calibrated && filament.pressureAdvance != null) {
     config.enable_pressure_advance = ["1"];
     config.pressure_advance = [String(filament.pressureAdvance)];
   }
@@ -177,9 +177,7 @@ function projectConfig(modelName: string, settings: CrealityProjectSettings, fil
     printer_settings_id: `Creality Hi ${nozzle} nozzle`,
     print_settings_id: names.process,
     filament_settings_id: [names.filament],
-    curr_bed_type: "Textured PEI Plate",
-    print_sequence: "by layer",
-    ...processValues(settings, nozzle),
+    ...conservativeProcessOverrides(settings, nozzle),
     ...filamentProjectValues(filament),
   };
   return JSON.stringify(config, null, 4);
@@ -188,26 +186,22 @@ function projectConfig(modelName: string, settings: CrealityProjectSettings, fil
 function embeddedProcessConfig(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
   const names = embeddedNames(modelName, settings, filament);
   return JSON.stringify({
-    type: "process",
     version: "7.2.1",
     name: names.process,
     from: "project",
-    instantiation: "true",
     inherits: processPreset(settings.layer, nozzle),
     print_settings_id: names.process,
     compatible_printers: [`Creality Hi ${nozzle} nozzle`],
-    ...processValues(settings, nozzle),
+    ...conservativeProcessOverrides(settings, nozzle),
   }, null, 4);
 }
 
 function embeddedFilamentConfig(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
   const names = embeddedNames(modelName, settings, filament);
   return JSON.stringify({
-    type: "filament",
     version: "7.2.1",
     name: names.filament,
     from: "project",
-    instantiation: "true",
     inherits: filamentPreset(filament.family, nozzle),
     filament_settings_id: [names.filament],
     compatible_printers: [`Creality Hi ${nozzle} nozzle`],
@@ -265,7 +259,7 @@ ${trianglesXml}
 }
 
 function modelConfig(name: string, settings: CrealityProjectSettings, nozzle: string) {
-  const objectMetadata = Object.entries(processValues(settings, nozzle)).map(([key, value]) => `    <metadata key="${xml(key)}" value="${xml(value)}"/>`).join("\n");
+  const objectMetadata = Object.entries(conservativeProcessOverrides(settings, nozzle)).map(([key, value]) => `    <metadata key="${xml(key)}" value="${xml(value)}"/>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <config>
   <object id="1">
@@ -281,8 +275,6 @@ ${objectMetadata}
     <metadata key="plater_id" value="1"/>
     <metadata key="plater_name" value="PrintPilot · ${xml(name)}"/>
     <metadata key="locked" value="false"/>
-    <metadata key="bed_type" value="Textured PEI Plate"/>
-    <metadata key="print_sequence" value="by layer"/>
     <model_instance>
       <metadata key="object_id" value="1"/>
       <metadata key="instance_id" value="0"/>
@@ -361,6 +353,7 @@ export function buildCrealityProject(params: {
   filament: ExportFilament;
 }) {
   const name = safeName(params.modelName);
+  const overrides = conservativeProcessOverrides(params.settings, params.nozzle);
   const files: ZipEntry[] = [
     {
       name: "[Content_Types].xml",
@@ -377,8 +370,18 @@ export function buildCrealityProject(params: {
     { name: "Metadata/filament_settings_1.config", data: encoder.encode(embeddedFilamentConfig(name, params.settings, params.filament, params.nozzle)) },
     {
       name: "Metadata/printpilot.json",
-      data: encoder.encode(JSON.stringify({ generator: "PrintPilot Hi", exportVersion: 2, generatedAt: new Date().toISOString(), orientation: "Coordonnées du STL conservées ; Z minimum posé sur le plateau", filament: params.filament.label, settings: params.settings }, null, 2)),
+      data: encoder.encode(JSON.stringify({
+        generator: "PrintPilot Hi",
+        exportVersion: 3,
+        policy: "conservative-overrides",
+        generatedAt: new Date().toISOString(),
+        orientation: "Coordonnées du STL conservées ; Z minimum posé sur le plateau",
+        filament: params.filament.label,
+        appliedProcessOverrides: overrides,
+        preservedByCreality: ["enable_prime_tower", "purge_in_prime_tower", "flush_into_infill", "flush_into_objects", "flush_into_support", "retraction", "cooling", "seam", "line_widths", "bed_type", "print_sequence"],
+        settings: params.settings,
+      }, null, 2)),
     },
   ];
-  return { blob: zip(files), filename: `${name}_PrintPilot_v2_CrealityHi.3mf` };
+  return { blob: zip(files), filename: `${name}_PrintPilot_v3_conservateur_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
 }
