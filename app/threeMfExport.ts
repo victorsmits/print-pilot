@@ -144,6 +144,7 @@ function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle:
 function projectConfig(settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
   const officialProcess = processPreset(settings.layer, nozzle);
   const officialFilament = filamentPreset(filament.family, nozzle);
+  const overrides = conservativeProcessOverrides(settings, nozzle);
   const config: ConfigRecord = {
     ...completeCrealityHiProcessProfile(settings.layer),
     version: "7.2.1",
@@ -152,7 +153,12 @@ function projectConfig(settings: CrealityProjectSettings, filament: ExportFilame
     printer_settings_id: `Creality Hi ${nozzle} nozzle`,
     print_settings_id: officialProcess,
     filament_settings_id: [officialFilament],
-    ...conservativeProcessOverrides(settings, nozzle),
+    ...overrides,
+    // Creality Print intentionally restores every value from the named system
+    // preset unless the project explicitly lists which keys are different.
+    // Entry 0 is the process profile, entry 1 the sole filament and entry 2
+    // the printer profile.
+    different_settings_to_system: [Object.keys(overrides).join(";"), "", ""],
   };
   return JSON.stringify(config, null, 4);
 }
@@ -316,7 +322,7 @@ export function buildCrealityProject(params: {
       name: "Metadata/printpilot.json",
       data: encoder.encode(JSON.stringify({
         generator: "PrintPilot Hi",
-        exportVersion: 4,
+        exportVersion: 5,
         policy: "full-official-profile-plus-explicit-overrides",
         generatedAt: new Date().toISOString(),
         orientation: "Coordonnées du STL conservées ; Z minimum posé sur le plateau",
@@ -325,11 +331,12 @@ export function buildCrealityProject(params: {
         officialBaseLayer: normalizeCrealityHiLayer(params.settings.layer),
         officialFilamentProfile: filamentPreset(params.filament.family, params.nozzle),
         appliedProcessOverrides: overrides,
+        declaredProcessDifferences: Object.keys(overrides),
         unchangedOfficialSections: ["prime_tower", "purge", "retraction", "cooling", "seam", "line_widths", "bed_type", "print_sequence"],
         filamentCalibrationExported: false,
         settings: params.settings,
       }, null, 2)),
     },
   ];
-  return { blob: zip(files), filename: `${name}_PrintPilot_v4_profil_complet_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
+  return { blob: zip(files), filename: `${name}_PrintPilot_v5_reglages_appliques_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
 }

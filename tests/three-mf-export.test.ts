@@ -27,7 +27,7 @@ const project = buildCrealityProject({
 const bytes = new Uint8Array(await project.blob.arrayBuffer());
 const archiveText = new TextDecoder().decode(bytes);
 
-assert.equal(project.filename, "cube-test_PrintPilot_v4_profil_complet_CrealityHi.3mf");
+assert.equal(project.filename, "cube-test_PrintPilot_v5_reglages_appliques_CrealityHi.3mf");
 assert.match(archiveText, /"print_settings_id": "0\.12mm Standard @Creality Hi 0\.4 nozzle"/);
 assert.match(archiveText, /"line_width": "0\.42"/);
 assert.match(archiveText, /"inner_wall_line_width": "0\.45"/);
@@ -38,6 +38,9 @@ assert.match(archiveText, /"enable_prime_tower": "1"/);
 assert.match(archiveText, /"wall_loops": "4"/);
 assert.match(archiveText, /"sparse_infill_density": "25%"/);
 assert.match(archiveText, /"enable_support": "1"/);
+assert.match(archiveText, /"different_settings_to_system": \[/);
+assert.match(archiveText, /layer_height;wall_loops;sparse_infill_density;sparse_infill_pattern;enable_support/);
+assert.match(archiveText, /support_type;support_style;support_threshold_angle/);
 assert.doesNotMatch(archiveText, /Metadata\/process_settings_1\.config/);
 assert.doesNotMatch(archiveText, /Metadata\/filament_settings_1\.config/);
 
