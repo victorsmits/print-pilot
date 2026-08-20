@@ -96,24 +96,12 @@ function infillPattern(value: string) {
   return value === "Gyroïde" ? "gyroid" : "adaptivecubic";
 }
 
-function projectConfig(settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
+type ConfigRecord = Record<string, string | string[]>;
+
+function processValues(settings: CrealityProjectSettings, nozzle: string): Record<string, string> {
   const layer = nozzle === "0.6" ? 0.3 : layerNumber(settings.layer);
-  const filamentName = filamentPreset(filament.family, nozzle);
-  const nozzleTemperature = filament.nozzleTempMax ?? filament.nozzleTempMin;
-  const bedTemperature = filament.bedTempMax ?? filament.bedTempMin;
   const ironingEnabled = settings.ironing !== "Désactivé";
-  const config: Record<string, string | string[]> = {
-    version: "7.2.1",
-    name: "project_settings",
-    from: "project",
-    printer_settings_id: `Creality Hi ${nozzle} nozzle`,
-    print_settings_id: processPreset(settings.layer, nozzle),
-    filament_settings_id: [filamentName],
-    filament_type: [filamentType(filament.family)],
-    filament_vendor: [filament.brand || "Generic"],
-    filament_colour: [filament.colorHex || "#35D77D"],
-    curr_bed_type: "Textured PEI Plate",
-    print_sequence: "by layer",
+  return {
     layer_height: String(layer),
     wall_loops: String(settings.walls),
     top_shell_layers: String(settings.topLayers),
@@ -136,12 +124,30 @@ function projectConfig(settings: CrealityProjectSettings, filament: ExportFilame
     support_interface_top_layers: String(settings.support.interfaceLayers),
     support_interface_spacing: String(settings.support.interfaceSpacing),
     brim_type: settings.brim.startsWith("Bordure") ? "outer_only" : "auto_brim",
-    brim_width: settings.brim.startsWith("Bordure") ? "5" : "0",
+    brim_width: "5",
     ironing_type: ironingEnabled ? "top" : "no ironing",
     ironing_pattern: "zig-zag",
     ironing_speed: "30",
     ironing_flow: "25%",
     ironing_spacing: "0.15",
+  };
+}
+
+function embeddedNames(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament) {
+  const suffix = safeName(modelName).slice(0, 42);
+  return {
+    process: `PrintPilot ${presetLayer(settings.layer)}mm · ${suffix}`,
+    filament: `PrintPilot ${filament.family} · ${suffix}`,
+  };
+}
+
+function filamentProjectValues(filament: ExportFilament): ConfigRecord {
+  const nozzleTemperature = filament.nozzleTempMax ?? filament.nozzleTempMin;
+  const bedTemperature = filament.bedTempMax ?? filament.bedTempMin;
+  const config: ConfigRecord = {
+    filament_type: [filamentType(filament.family)],
+    filament_vendor: [filament.brand || "Generic"],
+    filament_colour: [filament.colorHex || "#35D77D"],
   };
   if (nozzleTemperature != null) {
     config.nozzle_temperature = [String(nozzleTemperature)];
@@ -159,7 +165,54 @@ function projectConfig(settings: CrealityProjectSettings, filament: ExportFilame
     config.enable_pressure_advance = ["1"];
     config.pressure_advance = [String(filament.pressureAdvance)];
   }
+  return config;
+}
+
+function projectConfig(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
+  const names = embeddedNames(modelName, settings, filament);
+  const config: ConfigRecord = {
+    version: "7.2.1",
+    name: "project_settings",
+    from: "project",
+    printer_settings_id: `Creality Hi ${nozzle} nozzle`,
+    print_settings_id: names.process,
+    filament_settings_id: [names.filament],
+    curr_bed_type: "Textured PEI Plate",
+    print_sequence: "by layer",
+    ...processValues(settings, nozzle),
+    ...filamentProjectValues(filament),
+  };
   return JSON.stringify(config, null, 4);
+}
+
+function embeddedProcessConfig(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
+  const names = embeddedNames(modelName, settings, filament);
+  return JSON.stringify({
+    type: "process",
+    version: "7.2.1",
+    name: names.process,
+    from: "project",
+    instantiation: "true",
+    inherits: processPreset(settings.layer, nozzle),
+    print_settings_id: names.process,
+    compatible_printers: [`Creality Hi ${nozzle} nozzle`],
+    ...processValues(settings, nozzle),
+  }, null, 4);
+}
+
+function embeddedFilamentConfig(modelName: string, settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
+  const names = embeddedNames(modelName, settings, filament);
+  return JSON.stringify({
+    type: "filament",
+    version: "7.2.1",
+    name: names.filament,
+    from: "project",
+    instantiation: "true",
+    inherits: filamentPreset(filament.family, nozzle),
+    filament_settings_id: [names.filament],
+    compatible_printers: [`Creality Hi ${nozzle} nozzle`],
+    ...filamentProjectValues(filament),
+  }, null, 4);
 }
 
 function modelXml(name: string, triangles: ExportTriangle[]) {
@@ -211,11 +264,13 @@ ${trianglesXml}
 </model>`;
 }
 
-function modelConfig(name: string) {
+function modelConfig(name: string, settings: CrealityProjectSettings, nozzle: string) {
+  const objectMetadata = Object.entries(processValues(settings, nozzle)).map(([key, value]) => `    <metadata key="${xml(key)}" value="${xml(value)}"/>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <config>
   <object id="1">
     <metadata key="name" value="${xml(name)}"/>
+${objectMetadata}
     <part id="1" subtype="normal_part">
       <metadata key="name" value="${xml(name)}"/>
       <metadata key="matrix" value="1 0 0 0 1 0 0 0 1 0 0 0 1 0 0 0"/>
@@ -316,12 +371,14 @@ export function buildCrealityProject(params: {
       data: encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`),
     },
     { name: "3D/3dmodel.model", data: encoder.encode(modelXml(name, params.triangles)) },
-    { name: "Metadata/model_settings.config", data: encoder.encode(modelConfig(name)) },
-    { name: "Metadata/project_settings.config", data: encoder.encode(projectConfig(params.settings, params.filament, params.nozzle)) },
+    { name: "Metadata/model_settings.config", data: encoder.encode(modelConfig(name, params.settings, params.nozzle)) },
+    { name: "Metadata/project_settings.config", data: encoder.encode(projectConfig(name, params.settings, params.filament, params.nozzle)) },
+    { name: "Metadata/process_settings_1.config", data: encoder.encode(embeddedProcessConfig(name, params.settings, params.filament, params.nozzle)) },
+    { name: "Metadata/filament_settings_1.config", data: encoder.encode(embeddedFilamentConfig(name, params.settings, params.filament, params.nozzle)) },
     {
       name: "Metadata/printpilot.json",
-      data: encoder.encode(JSON.stringify({ generator: "PrintPilot Hi", generatedAt: new Date().toISOString(), orientation: "Coordonnées du STL conservées ; Z minimum posé sur le plateau", filament: params.filament.label, settings: params.settings }, null, 2)),
+      data: encoder.encode(JSON.stringify({ generator: "PrintPilot Hi", exportVersion: 2, generatedAt: new Date().toISOString(), orientation: "Coordonnées du STL conservées ; Z minimum posé sur le plateau", filament: params.filament.label, settings: params.settings }, null, 2)),
     },
   ];
-  return { blob: zip(files), filename: `${name}_PrintPilot_CrealityHi.3mf` };
+  return { blob: zip(files), filename: `${name}_PrintPilot_v2_CrealityHi.3mf` };
 }

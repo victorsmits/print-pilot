@@ -263,7 +263,7 @@ export type AccountUser = { displayName: string; email: string } | null;
 
 export default function PrintPilotClient({ user }: { user: AccountUser }) {
   const [mesh, setMesh] = useState<MeshStats | null>(null), [fileState, setFileState] = useState<"idle" | "loading" | "error" | "manual">("idle"), [error, setError] = useState(""), [step, setStep] = useState(1);
-  const [useCase, setUseCase] = useState("functional"), [priority, setPriority] = useState("balance"), [precision, setPrecision] = useState("standard"), [visibleTop, setVisibleTop] = useState(true), [loadDirection, setLoadDirection] = useState("faible");
+  const [useCase, setUseCase] = useState("functional"), [secondaryUses, setSecondaryUses] = useState<string[]>([]), [priority, setPriority] = useState("balance"), [precision, setPrecision] = useState("standard"), [visibleTop, setVisibleTop] = useState(true), [loadDirection, setLoadDirection] = useState("faible");
   const [environment, setEnvironment] = useState("inside"), [fitType, setFitType] = useState("none"), [supportAccess, setSupportAccess] = useState("easy"), [exposure, setExposure] = useState("normal");
   const [shapeClass, setShapeClass] = useState("prismatic"), [undersideFinish, setUndersideFinish] = useState("standard"), [featureSize, setFeatureSize] = useState("normal"), [nozzle, setNozzle] = useState("0.4");
   const [filamentId, setFilamentId] = useState(FILAMENTS[0].id), [printer, setPrinter] = useState("hi"), [mode, setMode] = useState<"balanced" | "quality" | "fast">("balanced"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
@@ -306,13 +306,22 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
       .catch(() => { /* Le catalogue local reste disponible hors ligne. */ });
     return () => { active = false; };
   }, [user]);
+  function choosePrimaryUse(id: string) {
+    setUseCase(id);
+    setSecondaryUses(current => current.filter(value => value !== id));
+  }
+  function toggleSecondaryUse(id: string) {
+    if (id === useCase) return;
+    setSecondaryUses(current => current.includes(id) ? current.filter(value => value !== id) : current.length < 2 ? [...current, id] : current);
+  }
   const recommendation = useMemo(() => {
-    const quality = mode === "quality" || priority === "quality" || precision === "fine", fast = mode === "fast" || priority === "speed" || useCase === "prototype";
+    const activeUses = new Set([useCase, ...secondaryUses]);
+    const quality = mode === "quality" || priority === "quality" || precision === "fine" || (useCase === "decor" && mode !== "fast"), fast = mode === "fast" || priority === "speed" || useCase === "prototype";
     let layer = quality ? "0,12 mm" : fast ? "0,24 mm" : "0,20 mm"; if (precision === "fine" && mode === "quality") layer = "0,08 mm"; if (precision === "rough" && mode === "fast") layer = "0,28 mm";
     if (featureSize === "micro" && nozzle === "0.4" && mode !== "fast") layer = "0,08 mm";
     if (nozzle === "0.6" && (layer === "0,08 mm" || layer === "0,12 mm")) layer = quality ? "0,16 mm" : "0,20 mm";
-    let walls = useCase === "functional" || priority === "strength" || useCase === "container" ? 4 : 3; if (mode === "fast") walls = Math.max(2, walls - 1);
-    const infill = priority === "strength" || useCase === "functional" ? 25 : useCase === "container" ? 18 : fast ? 10 : 15, pattern = priority === "strength" ? "Gyroïde" : "Cubique adaptatif", supportRatio = mesh?.overhangPercent ?? 0;
+    let walls = activeUses.has("functional") || priority === "strength" || activeUses.has("container") ? 4 : 3; if (mode === "fast") walls = Math.max(2, walls - 1);
+    const infill = priority === "strength" || activeUses.has("functional") ? 25 : activeUses.has("container") ? 18 : fast ? 10 : 15, pattern = priority === "strength" ? "Gyroïde" : "Cubique adaptatif", supportRatio = mesh?.overhangPercent ?? 0;
     const base = PROFILE_BASES[layer] ?? PROFILE_BASES["0,20 mm"], layerMm = Number(layer.slice(0, 4).replace(",", "."));
     const supportsEnabled = Boolean(mesh && supportRatio >= 2 && mesh.overhangAreaMm2 >= 35);
     const treeSupport = shapeClass === "organic" || shapeClass === "tall";
@@ -329,11 +338,12 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     const support = supportsEnabled ? `${supportType} · ${supportThreshold}°` : "Désactivés";
     const supportPlan = { enabled: supportsEnabled, type: supportType, style: supportStyle, threshold: supportThreshold, onPlateOnly: supportOnPlateOnly, criticalOnly: supportCriticalOnly, topZ, xy: supportXY, interfaceLayers: contactLayers, interfaceSpacing };
     const brim = mesh && (mesh.baseScore < 7 || Math.max(...mesh.size) / Math.max(1, Math.min(...mesh.size.filter(v => v > 0))) > 5) ? "Bordure 5 mm" : "Auto / aucune";
-    const ironing = visibleTop && (useCase === "decor" || priority === "quality") ? "Toutes les surfaces supérieures" : "Désactivé", cautions: string[] = [];
+    const ironing = visibleTop && (activeUses.has("decor") || priority === "quality") ? "Toutes les surfaces supérieures" : "Désactivé", cautions: string[] = [];
     if (filament.family === "PETG") cautions.push("Le PETG file davantage et tolère moins bien les ponts : ralentir les ponts et sécher la bobine.");
     if (filament.family === "PLA Wood") cautions.push("Buse 0,6 mm conseillée ; éviter les très petites couches et surveiller le débit.");
-    if ((environment === "outside" || exposure === "water") && filament.family.startsWith("PLA")) cautions.push("Pour l’extérieur ou l’humidité durable, ce PLA n’est pas le meilleur choix : préfère le PETG de ton inventaire.");
+    if ((activeUses.has("outdoor") || environment === "outside" || exposure === "water") && filament.family.startsWith("PLA")) cautions.push("Pour l’extérieur ou l’humidité durable, ce PLA n’est pas le meilleur choix : préfère le PETG de ton inventaire.");
     if (exposure === "heat" && filament.family.startsWith("PLA")) cautions.push("Risque thermique : le PLA peut se déformer dans une voiture, près d’une source chaude ou en plein soleil.");
+    if (activeUses.has("fit") && fitType === "none") cautions.push("L’usage Ajustement est sélectionné : précise le type d’ajustement pour affiner le conseil.");
     if (fitType !== "none") cautions.push("L’ajustement ne peut pas être garanti par une valeur universelle : imprime une petite éprouvette de jeu avant la pièce finale.");
     if (supportAccess === "closed" && supportRatio >= 2) cautions.push("Les supports seraient difficiles à retirer dans cette cavité : privilégie une autre orientation ou sépare la pièce.");
     if (shapeClass === "cavity") cautions.push(supportsEnabled ? "Une cavité fermée peut emprisonner les supports. Vérifie leur chemin de retrait ou coupe temporairement la pièce pour l’impression." : "La forme indique une cavité, mais elle n’active pas automatiquement les supports : vérifie les îlots après tranchage.");
@@ -344,7 +354,7 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     if (printer !== "hi") cautions.push("L’imprimante active n’est pas la Creality Hi : les profils et limites peuvent être incorrects.");
     if (mesh && mesh.overhangPercent > 10) cautions.push("Beaucoup de faces descendantes détectées : tester l’orientation proposée avant d’ajouter des supports.");
     return { layer, walls, infill, pattern, support, supportPlan, brim, ironing, cautions, base };
-  }, [mode, priority, precision, useCase, mesh, visibleTop, filament, printer, environment, exposure, fitType, supportAccess, shapeClass, undersideFinish, featureSize, nozzle]);
+  }, [mode, priority, precision, useCase, secondaryUses, mesh, visibleTop, filament, printer, environment, exposure, fitType, supportAccess, shapeClass, undersideFinish, featureSize, nozzle]);
   const estimate = useMemo(() => {
     if (!mesh || mesh.volumeCm3 <= 0) return null;
     const nozzleMm = Number(nozzle), layerMm = nozzle === "0.6" ? 0.3 : Number(recommendation.layer.match(/[\d,.]+/)?.[0].replace(",", ".") ?? "0.2");
@@ -379,7 +389,7 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     const url = URL.createObjectURL(project.blob), anchor = document.createElement("a");
     anchor.href = url; anchor.download = project.filename; anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-    setExportStatus("3MF créé localement : ouvre-le dans Creality Print comme projet et contrôle l’aperçu avant impression.");
+    setExportStatus("3MF v2 créé : ouvre-le comme projet. Le profil PrintPilot est embarqué et les réglages compatibles sont aussi appliqués à l’objet.");
   }
   async function loadFile(file: File) { setError(""); if (file.name.toLowerCase().endsWith(".3mf")) { setFileState("manual"); setMesh(null); setStep(2); return; } if (!file.name.toLowerCase().endsWith(".stl")) { setFileState("error"); setError("Format non reconnu. Utilise un fichier STL ou 3MF."); return; } try { setFileState("loading"); setMesh(analyseMesh(file.name, parseSTL(await file.arrayBuffer()))); setFileState("idle"); setStep(2); } catch (e) { setFileState("error"); setError(e instanceof Error ? e.message : "Impossible d’analyser ce fichier."); } }
   const choose = (e: ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) loadFile(file); }, drop = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); const file = e.dataTransfer.files?.[0]; if (file) loadFile(file); };
@@ -394,7 +404,8 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
       {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : analyse automatique complète<br/>3MF : questionnaire guidé dans cette version</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>Glisser pour tourner</span></div><p className="orientation-assumption">Orientation analysée : axes du STL conservés, point Z le plus bas posé sur le plateau.</p></div></div><button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
       {step === 2 && <div className="step-panel">
         <Title step="02" title="À quoi servira la pièce ?" note="L’usage change davantage les réglages que la forme seule"/>
-        <div className="choice-grid">{USES.map(u => <button key={u.id} className={`choice-card ${useCase === u.id ? "selected" : ""}`} onClick={() => setUseCase(u.id)}><span className="choice-radio"></span><b>{u.title}</b><small>{u.subtitle}</small></button>)}</div>
+        <div className="usage-heading"><b>Choisis un usage principal</b><span>Puis ajoute jusqu’à 2 usages secondaires · {secondaryUses.length}/2 sélectionné(s)</span></div>
+        <div className="choice-grid">{USES.map(u => { const primary = useCase === u.id, secondary = secondaryUses.includes(u.id), limitReached = secondaryUses.length >= 2 && !secondary; return <div key={u.id} className={`choice-card usage-card ${primary ? "selected" : ""} ${secondary ? "secondary-selected" : ""}`}><button className="usage-primary" onClick={() => choosePrimaryUse(u.id)}><span className="choice-radio"></span><b>{u.title}</b><small>{u.subtitle}</small></button><label><input type="checkbox" checked={secondary} disabled={primary || limitReached} onChange={() => toggleSecondaryUse(u.id)}/><span>{primary ? "Usage principal" : "Ajouter en secondaire"}</span></label></div>; })}</div>
         <div className="form-grid"><fieldset><legend><InfoLabel item="priority">Priorité</InfoLabel></legend><div className="segmented">{[["quality","Finition"],["balance","Équilibre"],["speed","Rapidité"],["strength","Solidité"]].map(([id,label]) => <button key={id} className={priority === id ? "active" : ""} onClick={() => setPriority(id)}>{label}</button>)}</div></fieldset><fieldset><legend><InfoLabel item="precision">Précision souhaitée</InfoLabel></legend><div className="segmented three">{[["fine","Fine"],["standard","Standard"],["rough","Large"]].map(([id,label]) => <button key={id} className={precision === id ? "active" : ""} onClick={() => setPrecision(id)}>{label}</button>)}</div></fieldset><label className="switch-row"><span><b><InfoLabel item="visibleTop">Face supérieure visible</InfoLabel></b><small>Peut justifier le lissage</small></span><input type="checkbox" checked={visibleTop} onChange={e => setVisibleTop(e.target.checked)}/><i></i></label><label className="select-row"><span><b><InfoLabel item="loadDirection">Effort mécanique</InfoLabel></b><small>Direction et intensité attendues</small></span><select value={loadDirection} onChange={e => setLoadDirection(e.target.value)}><option value="faible">Faible / décoratif</option><option value="xy">Principalement dans le plan XY</option><option value="z">Risque entre couches Z</option><option value="multi">Multidirectionnel</option></select></label></div>
         <details className="advanced-criteria" open><summary>Critères avancés</summary><div className="criteria-grid">
           <label><InfoLabel item="shapeClass">Forme globale</InfoLabel><select value={shapeClass} onChange={e => setShapeClass(e.target.value)}><option value="prismatic">Mécanique / prismatique</option><option value="organic">Organique / figurine</option><option value="tall">Fine et haute</option><option value="broad">Large dessous plat</option><option value="cavity">Cavité ou tunnel interne</option></select></label>
