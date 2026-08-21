@@ -25,18 +25,7 @@ type MeshStats = {
   orientationNote: string;
 };
 
-const FILAMENTS = [
-  { id: "pla-basic-noir", label: "Bambu PLA Basic · Noir", family: "PLA", note: "Polyvalent, facile et précis." },
-  { id: "pla-basic-jade", label: "Bambu PLA Basic · Blanc jade", family: "PLA", note: "Polyvalent, marques de surface plus visibles." },
-  { id: "pla-basic-beige", label: "Bambu PLA Basic · Beige", family: "PLA", note: "Polyvalent, bon pour les objets décoratifs." },
-  { id: "pla-matte-blanc", label: "Bambu PLA Matte · Blanc cassé", family: "PLA Matte", note: "Très beau rendu, détails fins un peu adoucis." },
-  { id: "pla-matte-vert", label: "Bambu PLA Matte · Vert foncé", family: "PLA Matte", note: "Rendu mat, privilégier une vitesse modérée." },
-  { id: "pla-matte-bleu", label: "Bambu PLA Matte · Bleu foncé", family: "PLA Matte", note: "Rendu mat, privilégier une vitesse modérée." },
-  { id: "pla-matte-brun", label: "Bambu PLA Matte · Brun désert", family: "PLA Matte", note: "Rendu mat, bon pour le coffret et la déco." },
-  { id: "pla-matte-terre", label: "Bambu PLA Matte · Terre cuite", family: "PLA Matte", note: "Rendu mat, bon pour les objets décoratifs." },
-  { id: "petg-basic", label: "Bambu PETG Basic · Blanc", family: "PETG", note: "Humidité et usage extérieur ; ponts plus délicats." },
-  { id: "pla-wood", label: "Bambu PLA Wood · Palissandre", family: "PLA Wood", note: "Aspect bois ; débit prudent et buse 0,6 mm conseillée." },
-];
+const GENERIC_FILAMENT = { id: "generic", label: "Matériau non renseigné", family: "PLA", note: "Ajoute une bobine réelle pour obtenir des conseils adaptés." };
 
 export type InventoryFilament = {
   id: string;
@@ -420,13 +409,24 @@ function InfoLabel({ children, item }: { children: string; item: CriteriaHelpKey
 
 export type AccountUser = { displayName: string; email: string } | null;
 
+function authErrorMessage(code: string) {
+  if (code === "invalid_oauth_response") return "La réponse OAuth a expiré ou ne correspond pas à cette session. Recommence la connexion.";
+  if (code === "google_network_error") return "Le conteneur n’arrive pas à établir une connexion TLS vers Google. Vérifie ses certificats et sa connexion Internet.";
+  if (code === "google_invalid_client") return "Google refuse l’identifiant ou le secret du client OAuth.";
+  if (code === "google_redirect_uri_mismatch") return "L’URI de redirection ne correspond pas exactement à celle enregistrée chez Google.";
+  if (code === "google_invalid_grant") return "Google a rejeté le code de connexion. Recommence après avoir vérifié l’URI et l’heure du serveur.";
+  if (code === "google_access_denied") return "La connexion a été annulée ou ce compte n’est pas autorisé comme utilisateur de test.";
+  if (code === "google_identity_invalid") return "Google n’a pas retourné une adresse e-mail vérifiée exploitable.";
+  return "La connexion Google a échoué. Consulte les journaux du conteneur pour obtenir le diagnostic précis.";
+}
+
 export default function PrintPilotClient({ user, authError = null }: { user: AccountUser; authError?: string | null }) {
   const [mesh, setMesh] = useState<MeshStats | null>(null), [fileState, setFileState] = useState<"idle" | "loading" | "error">("idle"), [error, setError] = useState(""), [step, setStep] = useState(1);
   const [useCase, setUseCase] = useState("functional"), [secondaryUses, setSecondaryUses] = useState<string[]>([]), [priority, setPriority] = useState("balance"), [precision, setPrecision] = useState("standard"), [visibleTop, setVisibleTop] = useState(true), [loadDirection, setLoadDirection] = useState("faible");
   const [environment, setEnvironment] = useState("inside"), [fitType, setFitType] = useState("none"), [supportAccess, setSupportAccess] = useState("easy"), [exposure, setExposure] = useState("normal");
   const [shapeClass, setShapeClass] = useState("prismatic"), [undersideFinish, setUndersideFinish] = useState("standard"), [featureSize, setFeatureSize] = useState("normal"), [textureIntent, setTextureIntent] = useState("preserve"), [nozzle, setNozzle] = useState("0.4");
-  const [filamentId, setFilamentId] = useState(FILAMENTS[0].id), [printer, setPrinter] = useState("hi"), [mode, setMode] = useState<"balanced" | "quality" | "fast">("balanced"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
-  const [inventory, setInventory] = useState<InventoryFilament[]>(FILAMENTS), [inventoryOpen, setInventoryOpen] = useState(false), [inventoryLoading, setInventoryLoading] = useState(false), [accountOpen, setAccountOpen] = useState(false), [exportStatus, setExportStatus] = useState("");
+  const [filamentId, setFilamentId] = useState(""), [printer, setPrinter] = useState("hi"), [mode, setMode] = useState<"balanced" | "quality" | "fast">("balanced"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
+  const [inventory, setInventory] = useState<InventoryFilament[]>([]), [inventoryOpen, setInventoryOpen] = useState(false), [inventoryLoading, setInventoryLoading] = useState(false), [accountOpen, setAccountOpen] = useState(false), [exportStatus, setExportStatus] = useState("");
   const [appliedPreset, setAppliedPreset] = useState(""), [slicedHours, setSlicedHours] = useState(""), [slicedMinutes, setSlicedMinutes] = useState(""), [slicedGrams, setSlicedGrams] = useState(""), [electricityPrice, setElectricityPrice] = useState("0.30"), [averagePower, setAveragePower] = useState("120");
   const [imported3mf, setImported3mf] = useState<Imported3mfProject | null>(null), [sourceTriangles, setSourceTriangles] = useState<Triangle[]>([]), [orientationId, setOrientationId] = useState("current");
   const [selectedDecisions, setSelectedDecisions] = useState<ExportDecision[]>(["layer", "walls", "shells", "infill", "support", "brim", "ironing"]);
@@ -434,10 +434,10 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
   const [experienceMode, setExperienceMode] = useState<"guided" | "expert">("guided"), [historyOpen, setHistoryOpen] = useState(false), [historyLoading, setHistoryLoading] = useState(false), [prints, setPrints] = useState<PrintRun[]>([]);
   const [outcome, setOutcome] = useState<"success" | "mixed" | "failed">("success"), [qualityRating, setQualityRating] = useState(4), [defects, setDefects] = useState(""), [printNotes, setPrintNotes] = useState(""), [printStatus, setPrintStatus] = useState("");
   const [sourceFingerprint, setSourceFingerprint] = useState<string | null>(null), [exchangeStatus, setExchangeStatus] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null), configInputRef = useRef<HTMLInputElement>(null), filament = inventory.find(f => f.id === filamentId) ?? inventory[0] ?? FILAMENTS[0];
+  const inputRef = useRef<HTMLInputElement>(null), configInputRef = useRef<HTMLInputElement>(null), filament = inventory.find(f => f.id === filamentId) ?? inventory[0] ?? GENERIC_FILAMENT;
 
   async function reloadPrints() {
-    if (!user) return;
+    if (!user) { setPrints([]); return; }
     setHistoryLoading(true);
     try {
       const response = await fetch("/api/prints", { cache: "no-store" });
@@ -447,7 +447,7 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
   }
 
   async function reloadInventory() {
-    if (!user) return;
+    if (!user) { setInventory([]); setFilamentId(""); return; }
     setInventoryLoading(true);
     try {
       const response = await fetch("/api/filaments", { cache: "no-store" });
@@ -459,7 +459,8 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
           family: String(row.material), note: row.calibrated ? "Profil calibré" : String(row.notes ?? "À calibrer"),
         } as InventoryFilament));
         setInventory(rows);
-        if (rows.length && !rows.some(row => row.id === filamentId)) setFilamentId(rows[0].id);
+        if (!rows.length) setFilamentId("");
+        else if (!rows.some(row => row.id === filamentId)) setFilamentId(rows[0].id);
       }
     } finally { setInventoryLoading(false); }
   }
@@ -477,9 +478,9 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
           family: String(row.material), note: row.calibrated ? "Profil calibré" : String(row.notes ?? "À calibrer"),
         } as InventoryFilament));
         setInventory(rows);
-        setFilamentId(current => rows.length && !rows.some(row => row.id === current) ? rows[0].id : current);
+        setFilamentId(current => !rows.length ? "" : !rows.some(row => row.id === current) ? rows[0].id : current);
       })
-      .catch(() => { /* Le catalogue local reste disponible hors ligne. */ });
+      .catch(() => { setInventory([]); setFilamentId(""); });
     return () => { active = false; };
   }, [user]);
   useEffect(() => {
@@ -787,11 +788,11 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
   }
   const choose = (e: ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) loadFile(file); }, drop = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); const file = e.dataTransfer.files?.[0]; if (file) loadFile(file); };
   return <main><TutorialPanel item={tutorial} onClose={() => setTutorial(null)} />
-    {inventoryOpen && <InventoryPanel inventory={inventory} loading={inventoryLoading} onReload={reloadInventory} onClose={() => setInventoryOpen(false)} />}
-    {historyOpen && <PrintHistoryPanel prints={prints} loading={historyLoading} onClose={() => setHistoryOpen(false)} />}
+    {user && inventoryOpen && <InventoryPanel inventory={inventory} loading={inventoryLoading} onReload={reloadInventory} onClose={() => setInventoryOpen(false)} />}
+    {user && historyOpen && <PrintHistoryPanel prints={prints} loading={historyLoading} onClose={() => setHistoryOpen(false)} />}
     {accountOpen && <AccountPanel user={user} inventoryCount={inventory.length} onClose={() => setAccountOpen(false)} />}
-    <header className="topbar"><a className="brand" href="#top"><span className="brand-mark">P</span><span>PRINTPILOT <b>HI</b></span></a><div className="machine-strip"><span className="status-dot"></span><label>Imprimante<select value={printer} onChange={e => setPrinter(e.target.value)}><option value="hi">Creality Hi</option><option value="k2">Creality K2 / autre</option></select></label><label>Buse<select value={nozzle} onChange={e => setNozzle(e.target.value)}><option value="0.4">0,4 mm</option><option value="0.6">0,6 mm</option></select></label><span className="machine-spec">260 × 260 × 300</span></div><div className="top-actions"><div className="experience-switch" aria-label="Niveau d’explication"><button className={experienceMode === "guided" ? "active" : ""} onClick={() => changeExperienceMode("guided")}>Guidé</button><button className={experienceMode === "expert" ? "active" : ""} onClick={() => changeExperienceMode("expert")}>Expert</button></div><button className="ghost" onClick={() => { setHistoryOpen(true); void reloadPrints(); }}>Historique <b>{prints.length}</b></button><button className="ghost" onClick={() => setInventoryOpen(true)}>Inventaire <b>{inventory.length}</b></button><button className="account-button" onClick={() => setAccountOpen(true)}><span>{(user?.displayName ?? "V").charAt(0).toUpperCase()}</span><i>{user?.displayName ?? "Compte"}</i></button></div></header>
-    {authError && <div className="auth-warning"><b>Connexion Google impossible.</b> {authError === "invalid_oauth_response" ? "La réponse OAuth a expiré ou ne correspond pas à cette session. Recommence la connexion." : "Google n’a pas pu confirmer la connexion. Vérifie l’URI de redirection et les identifiants OAuth."}</div>}
+    <header className="topbar"><a className="brand" href="#top"><span className="brand-mark">P</span><span>PRINTPILOT <b>HI</b></span></a><div className="machine-strip"><span className="status-dot"></span><label>Imprimante<select value={printer} onChange={e => setPrinter(e.target.value)}><option value="hi">Creality Hi</option><option value="k2">Creality K2 / autre</option></select></label><label>Buse<select value={nozzle} onChange={e => setNozzle(e.target.value)}><option value="0.4">0,4 mm</option><option value="0.6">0,6 mm</option></select></label><span className="machine-spec">260 × 260 × 300</span></div><div className="top-actions"><div className="experience-switch" aria-label="Niveau d’explication"><button className={experienceMode === "guided" ? "active" : ""} onClick={() => changeExperienceMode("guided")}>Guidé</button><button className={experienceMode === "expert" ? "active" : ""} onClick={() => changeExperienceMode("expert")}>Expert</button></div>{user ? <><button className="ghost" onClick={() => { setHistoryOpen(true); void reloadPrints(); }}>Historique <b>{prints.length}</b></button><button className="ghost" onClick={() => setInventoryOpen(true)}>Inventaire <b>{inventory.length}</b></button><button className="account-button connected" onClick={() => setAccountOpen(true)} aria-label="Ouvrir le compte connecté"><span>{user.displayName.charAt(0).toUpperCase()}</span><i>{user.displayName}</i></button></> : <a className="login-button" href="/auth/google?return_to=%2F">Se connecter avec Google</a>}</div></header>
+    {authError && <div className="auth-warning"><b>Connexion Google impossible.</b> {authErrorMessage(authError)}</div>}
     {printer !== "hi" && <div className="printer-warning"><b>Attention : mauvais profil machine.</b> Après l’ouverture d’un 3MF, Creality Print peut sélectionner une K2. Remets « Creality Hi » pour retrouver les bons profils.</div>}
     <section className="hero" id="top"><div className="hero-copy"><span className="eyebrow">ASSISTANT PERSONNEL · CREALITY HI</span><h1>Le bon profil.<br/><em>Les bons supports.</em><br/>Avant d’imprimer.</h1><p>Importe une pièce, combine géométrie, usage et bobine réelle, puis obtiens une configuration expliquée — avec le chemin exact dans Creality Print.</p></div><div className="hero-metric"><span>Moteur de décision basé sur</span><b>GÉOMÉTRIE</b><b>USAGE</b><b>INVENTAIRE</b></div></section>
     <nav className="steps">{["Modèle", "Usage", "Filament", "Configuration"].map((label, i) => <button key={label} className={step === i + 1 ? "active" : step > i + 1 ? "done" : ""} onClick={() => setStep(i + 1)}><span>{step > i + 1 ? "✓" : String(i + 1).padStart(2, "0")}</span>{label}</button>)}</nav>
@@ -814,7 +815,7 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
         </div></details>
         <Actions back={() => setStep(1)} next={() => setStep(3)} nextLabel="Choisir le filament"/>
       </div>}
-      {step === 3 && <div className="step-panel"><div className="section-title"><div><span className="eyebrow">ÉTAPE 03</span><h2>Choisis la bobine</h2></div><button className="secondary" onClick={() => setInventoryOpen(true)}>Gérer l’inventaire</button></div><div className="filament-list">{inventory.map(f => <button key={f.id} className={`filament-row ${filamentId === f.id ? "selected" : ""}`} onClick={() => setFilamentId(f.id)}><span className={`spool ${f.family.toLowerCase().replace(" ", "-")}`} style={f.colorHex ? { borderColor: f.colorHex } : undefined}></span><span><b>{f.label}</b><small>{f.remainingG != null ? `${fmt(f.remainingG)} g restants · ` : "Quantité inconnue · "}{f.note}</small></span><em>{f.family}</em></button>)}</div><div className="rfid-note"><b>Bobine RFID verrouillée ?</b><span>Retire puis réinsère la bobine et déclare-la manuellement si Creality Print empêche l’édition.</span><button onClick={() => setTutorial("filament")}>Voir où régler</button></div><Actions back={() => setStep(2)} next={() => setStep(4)} nextLabel="Calculer la configuration"/></div>}
+      {step === 3 && <div className="step-panel"><div className="section-title"><div><span className="eyebrow">ÉTAPE 03</span><h2>Choisis la bobine</h2></div>{user && <button className="secondary" onClick={() => setInventoryOpen(true)}>Gérer l’inventaire</button>}</div>{!user ? <section className="auth-gate"><span>INVENTAIRE PRIVÉ</span><h3>Connecte-toi pour accéder à tes bobines</h3><p>Aucune bobine ni donnée de compte n’est affichée sans session. Ton STL reste analysé localement dans le navigateur.</p><a className="primary account-link" href="/auth/google?return_to=%2F">Se connecter avec Google</a></section> : inventoryLoading ? <section className="inventory-empty"><h3>Chargement de l’inventaire…</h3></section> : inventory.length === 0 ? <section className="inventory-empty"><span>INVENTAIRE VIDE</span><h3>Aucune bobine enregistrée</h3><p>Ajoute ta première bobine pour adapter les températures, le coût, le débit et les conseils de calibration.</p><button className="primary" onClick={() => setInventoryOpen(true)}>Ajouter une bobine</button></section> : <><div className="filament-list">{inventory.map(f => <button key={f.id} className={`filament-row ${filamentId === f.id ? "selected" : ""}`} onClick={() => setFilamentId(f.id)}><span className={`spool ${f.family.toLowerCase().replace(" ", "-")}`} style={f.colorHex ? { borderColor: f.colorHex } : undefined}></span><span><b>{f.label}</b><small>{f.remainingG != null ? `${fmt(f.remainingG)} g restants · ` : "Quantité inconnue · "}{f.note}</small></span><em>{f.family}</em></button>)}</div><div className="rfid-note"><b>Bobine RFID verrouillée ?</b><span>Retire puis réinsère la bobine et déclare-la manuellement si Creality Print empêche l’édition.</span><button onClick={() => setTutorial("filament")}>Voir où régler</button></div></>}<Actions back={() => setStep(2)} next={() => setStep(4)} nextLabel="Calculer la configuration" disabled={!user || inventory.length === 0 || !filamentId}/></div>}
       {step === 4 && <div className="step-panel result-panel">
         <div className="section-title"><div><span className="eyebrow">ÉTAPE 04</span><h2>Configuration conseillée</h2></div><span className="confidence">CONFIANCE {mesh ? "ÉLEVÉE" : "MOYENNE"}</span></div>
         <div className="mode-tabs">{[["quality","Qualité"],["balanced","Recommandée"],["fast","Rapide"]].map(([id,label]) => <button key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id as typeof mode)}>{label}{id === "balanced" && <small>MEILLEUR COMPROMIS</small>}</button>)}</div>
@@ -850,4 +851,4 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
 }
 
 function Title({ step, title, note }: { step: string; title: string; note: string }) { return <div className="section-title"><div><span className="eyebrow">ÉTAPE {step}</span><h2>{title}</h2></div><span className="section-note">{note}</span></div>; }
-function Actions({ back, next, nextLabel }: { back: () => void; next: () => void; nextLabel: string }) { return <div className="panel-actions"><button className="ghost" onClick={back}>← Retour</button><button className="primary" onClick={next}>{nextLabel} →</button></div>; }
+function Actions({ back, next, nextLabel, disabled = false }: { back: () => void; next: () => void; nextLabel: string; disabled?: boolean }) { return <div className="panel-actions"><button className="ghost" onClick={back}>← Retour</button><button className="primary" onClick={next} disabled={disabled}>{nextLabel} →</button></div>; }

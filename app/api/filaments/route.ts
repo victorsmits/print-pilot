@@ -1,20 +1,23 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { filaments } from "../../../db/schema";
 import { getAuthenticatedUser } from "../../auth";
 
-const INITIAL_FILAMENTS = [
-  ["Bambu Lab", "PLA Basic", "PLA", "Noir", "#171918"],
-  ["Bambu Lab", "PLA Basic", "PLA", "Blanc jade", "#e8eee5"],
-  ["Bambu Lab", "PLA Basic", "PLA", "Beige", "#d8c5a6"],
-  ["Bambu Lab", "PLA Matte", "PLA Matte", "Blanc cassé", "#ece9df"],
-  ["Bambu Lab", "PLA Matte", "PLA Matte", "Vert foncé", "#234b38"],
-  ["Bambu Lab", "PLA Matte", "PLA Matte", "Bleu foncé", "#213a5b"],
-  ["Bambu Lab", "PLA Matte", "PLA Matte", "Brun désert", "#927054"],
-  ["Bambu Lab", "PLA Matte", "PLA Matte", "Terre cuite", "#a9523d"],
-  ["Bambu Lab", "PETG Basic", "PETG", "Blanc", "#f3f4ef"],
-  ["Bambu Lab", "PLA Wood", "PLA Wood", "Palissandre", "#67442f"],
-] as const;
+const LEGACY_DEMO_FILAMENTS = new Set([
+  "PLA Basic|PLA|Noir|#171918", "PLA Basic|PLA|Blanc jade|#e8eee5", "PLA Basic|PLA|Beige|#d8c5a6",
+  "PLA Matte|PLA Matte|Blanc cassé|#ece9df", "PLA Matte|PLA Matte|Vert foncé|#234b38", "PLA Matte|PLA Matte|Bleu foncé|#213a5b",
+  "PLA Matte|PLA Matte|Brun désert|#927054", "PLA Matte|PLA Matte|Terre cuite|#a9523d",
+  "PETG Basic|PETG|Blanc|#f3f4ef", "PLA Wood|PLA Wood|Palissandre|#67442f",
+]);
+
+function isUntouchedLegacyDemo(row: typeof filaments.$inferSelect) {
+  const key = `${row.productLine}|${row.material}|${row.colorName}|${row.colorHex}`;
+  return row.brand === "Bambu Lab" && LEGACY_DEMO_FILAMENTS.has(key)
+    && row.spoolWeightG === null && row.remainingG === null && row.pricePerKg === null
+    && row.supplier === null && row.purchaseDate === null && row.invoiceNumber === null
+    && row.profileName === null && row.calibrated === false
+    && (row.notes === "À calibrer." || row.notes === "À calibrer ; vérifier la buse et le débit.");
+}
 
 function numberOrNull(value: unknown): number | null {
   if (value === "" || value === null || value === undefined) return null;
@@ -42,21 +45,11 @@ export async function GET() {
     const user = await requireUser();
     const db = await getDb();
     let rows = await db.select().from(filaments).where(eq(filaments.userEmail, user.email)).orderBy(desc(filaments.updatedAt));
-    if (rows.length === 0) {
-      const now = new Date().toISOString();
-      const seedRows = INITIAL_FILAMENTS.map(([brand, productLine, material, colorName, colorHex]) => ({
-        userEmail: user.email, brand, productLine, material, colorName, colorHex,
-        profileName: null, calibrated: false, abrasive: material === "PLA Wood", cfsCompatible: material !== "PLA Wood",
-        notes: material === "PLA Wood" ? "À calibrer ; vérifier la buse et le débit." : "À calibrer.", createdAt: now, updatedAt: now,
-      }));
-
-      // D1 accepte au maximum 100 paramètres liés par requête. Les 10 lignes
-      // dépassent cette limite lorsqu'elles sont insérées en une seule fois.
-      // `batch` exécute les deux petites insertions dans une même transaction.
-      await db.batch([
-        db.insert(filaments).values(seedRows.slice(0, 5)),
-        db.insert(filaments).values(seedRows.slice(5)),
-      ]);
+    const obsoleteDemoIds = rows.filter(isUntouchedLegacyDemo).map(row => row.id);
+    if (obsoleteDemoIds.length) {
+      // Ces lignes étaient créées automatiquement par les anciennes versions.
+      // On ne retire que les entrées strictement intactes afin de préserver toute bobine modifiée.
+      await db.delete(filaments).where(and(eq(filaments.userEmail, user.email), inArray(filaments.id, obsoleteDemoIds)));
       rows = await db.select().from(filaments).where(eq(filaments.userEmail, user.email)).orderBy(desc(filaments.updatedAt));
     }
     return Response.json({ filaments: rows });
