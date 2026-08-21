@@ -1,7 +1,7 @@
 "use client";
 
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { extractInvoiceItems, inferBrand, inferMaterial, type InvoiceItemDraft } from "./invoiceParser";
+import { extractInvoiceItems, extractInvoiceMetadata, inferBrand, inferMaterial, type InvoiceItemDraft } from "./invoiceParser";
 
 export type InvoiceDraft = {
   supplier: string;
@@ -27,13 +27,6 @@ function firstMatch(text: string, patterns: RegExp[]) {
   return "";
 }
 
-function isoDate(raw: string) {
-  const match = raw.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
-  if (!match) return "";
-  const year = match[3].length === 2 ? `20${match[3]}` : match[3];
-  return `${year}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
-}
-
 export async function readInvoicePdf(file: File): Promise<InvoiceDraft> {
   const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
   pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -51,7 +44,7 @@ export async function readInvoicePdf(file: File): Promise<InvoiceDraft> {
   }
   const text = pages.join("\n").replace(/\s+/g, " ").trim();
   if (text.length < 30) throw new Error("Ce PDF semble être une image scannée. L’OCR n’est pas encore disponible ; utilise une facture PDF contenant du texte.");
-  const totalRaw = firstMatch(text, [/(?:total\s*(?:ttc)?|montant\s*(?:total)?)[^\d]{0,20}(\d+[.,]\d{2})\s*€/i, /€\s*(\d+[.,]\d{2})/i]);
+  const metadata = extractInvoiceMetadata(text), totalRaw = metadata.purchaseTotal;
   const weightKg = Number(firstMatch(text, [/(\d+(?:[.,]\d+)?)\s*kg/i]).replace(",", "."));
   const total = Number(totalRaw.replace(",", "."));
   const warnings: string[] = ["Vérifie les champs avant d’ajouter la bobine : la mise en page des factures varie selon le vendeur."];
@@ -61,9 +54,9 @@ export async function readInvoicePdf(file: File): Promise<InvoiceDraft> {
   if (items.length < 2) warnings.push("Une seule ligne produit a été reconnue. Tu peux ajouter manuellement les lignes manquantes avant l’import.");
   return {
     supplier: detectedBrand || firstMatch(text, [/(?:vendeur|seller|fournisseur)\s*[:#-]?\s*([^\d]{3,45})/i]),
-    invoiceNumber: firstMatch(text, [/(?:facture|invoice)\s*(?:n[°o.]?|number|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{3,})/i, /(?:commande|order)\s*(?:n[°o.]?|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{3,})/i]),
-    purchaseDate: isoDate(firstMatch(text, [/(?:date\s*(?:de\s*facture)?|invoice date)\s*[:#-]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i, /(\d{1,2}[./-]\d{1,2}[./-]\d{4})/])),
-    purchaseTotal: totalRaw.replace(",", "."),
+    invoiceNumber: metadata.invoiceNumber,
+    purchaseDate: metadata.purchaseDate,
+    purchaseTotal: metadata.purchaseTotal,
     brand: inferBrand(text),
     productLine: firstMatch(text, [/((?:PLA|PETG|TPU|ASA|ABS)[^€]{0,55})/i]),
     material: inferMaterial(text),
