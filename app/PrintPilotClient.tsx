@@ -6,6 +6,7 @@ import InventoryPanel from "./InventoryPanel";
 import PrintHistoryPanel, { type PrintRun } from "./PrintHistoryPanel";
 import { buildCrealityProject, type ExportDecision } from "./threeMfExport";
 import { read3mfProject, settingString, type Imported3mfProject } from "./threeMfImport";
+import { agentPrompt, binaryStl, parsePrintPilotExchange, safeExchangeName, type PrintPilotExchange } from "./diagnosticExchange";
 
 type Vec3 = [number, number, number];
 type Triangle = { a: Vec3; b: Vec3; c: Vec3; normal: Vec3; area: number };
@@ -256,6 +257,17 @@ export function minimumTriangleZ(triangles: Triangle[]) {
 
 function fmt(n: number, digits = 0) { return Number.isFinite(n) ? n.toFixed(digits).replace(".", ",") : "—"; }
 
+async function fileFingerprint(buffer: ArrayBuffer) {
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob), anchor = document.createElement("a");
+  anchor.href = url; anchor.download = filename; anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
 function ModelCanvas({ stats }: { stats: MeshStats | null }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const [rotation, setRotation] = useState<[number, number]>([-0.55, 0.75]);
@@ -316,7 +328,8 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
   const [selectedDecisions, setSelectedDecisions] = useState<ExportDecision[]>(["layer", "walls", "shells", "infill", "support", "brim", "ironing"]);
   const [experienceMode, setExperienceMode] = useState<"guided" | "expert">("guided"), [historyOpen, setHistoryOpen] = useState(false), [historyLoading, setHistoryLoading] = useState(false), [prints, setPrints] = useState<PrintRun[]>([]);
   const [outcome, setOutcome] = useState<"success" | "mixed" | "failed">("success"), [qualityRating, setQualityRating] = useState(4), [defects, setDefects] = useState(""), [printNotes, setPrintNotes] = useState(""), [printStatus, setPrintStatus] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null), filament = inventory.find(f => f.id === filamentId) ?? inventory[0] ?? FILAMENTS[0];
+  const [sourceFingerprint, setSourceFingerprint] = useState<string | null>(null), [exchangeStatus, setExchangeStatus] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null), configInputRef = useRef<HTMLInputElement>(null), filament = inventory.find(f => f.id === filamentId) ?? inventory[0] ?? FILAMENTS[0];
 
   async function reloadPrints() {
     if (!user) return;
@@ -451,6 +464,26 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     const totalCost = materialCost != null && energyCost != null ? materialCost + energyCost : null;
     return { hours, grams, materialCost, energyCost, totalCost };
   }, [slicedHours, slicedMinutes, slicedGrams, electricityPrice, averagePower, filament.pricePerKg]);
+  const exchangeConfiguration = useMemo<PrintPilotExchange>(() => ({
+    format: "printpilot-configuration",
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    source: { fileName: mesh?.name ?? null, fingerprint: sourceFingerprint, kind: imported3mf ? "3mf" : mesh ? "stl" : "none", orientationId },
+    machine: { printer: printer === "hi" ? "Creality Hi" : "Creality K2 / autre", nozzleMm: nozzle },
+    filament: {
+      id: filament.id, label: filament.label, family: filament.family, brand: filament.brand ?? null, productLine: filament.productLine ?? null,
+      colorName: filament.colorName ?? null, profileName: filament.profileName ?? null, nozzleTempMin: filament.nozzleTempMin ?? null, nozzleTempMax: filament.nozzleTempMax ?? null,
+      bedTempMin: filament.bedTempMin ?? null, bedTempMax: filament.bedTempMax ?? null, maxVolumetricSpeed: filament.maxVolumetricSpeed ?? null,
+      flowRatio: filament.flowRatio ?? null, pressureAdvance: filament.pressureAdvance ?? null, calibrated: Boolean(filament.calibrated), abrasive: Boolean(filament.abrasive),
+    },
+    criteria: { useCase, secondaryUses, priority, precision, visibleTop, loadDirection, environment, fitType, supportAccess, exposure, shapeClass, undersideFinish, featureSize, mode, appliedPreset },
+    geometry: mesh ? { sizeMm: mesh.size, triangleCount: mesh.triangles.length, volumeCm3: mesh.volumeCm3, surfaceAreaMm2: mesh.surfaceAreaMm2, overhangPercent: mesh.overhangPercent, overhangAreaMm2: mesh.overhangAreaMm2, baseScore: mesh.baseScore, orientation: mesh.orientation, orientationNote: mesh.orientationNote } : null,
+    imported3mf: imported3mf ? { printerProfile: imported3mf.printerProfile, processProfile: imported3mf.processProfile, filamentProfiles: imported3mf.filamentProfiles, objectCount: imported3mf.objectCount, plateCount: imported3mf.plateCount, projectSettings: imported3mf.projectSettings } : null,
+    recommendation: { ...recommendation },
+    selectedDecisions,
+    printResult: { outcome, qualityRating, defects, notes: printNotes, slicedHours, slicedMinutes, slicedGrams, electricityPricePerKwh: electricityPrice, averagePowerW: averagePower, materialCost: slicedCost.materialCost, energyCost: slicedCost.energyCost, totalCost: slicedCost.totalCost },
+  }), [mesh, sourceFingerprint, imported3mf, orientationId, printer, nozzle, filament, useCase, secondaryUses, priority, precision, visibleTop, loadDirection, environment, fitType, supportAccess, exposure, shapeClass, undersideFinish, featureSize, mode, appliedPreset, recommendation, selectedDecisions, outcome, qualityRating, defects, printNotes, slicedHours, slicedMinutes, slicedGrams, electricityPrice, averagePower, slicedCost]);
+  const promptForAgent = useMemo(() => agentPrompt(exchangeConfiguration), [exchangeConfiguration]);
   const orientationChoices = useMemo(() => {
     if (!sourceTriangles.length || (imported3mf?.plateCount ?? 1) > 1) return [];
     const step = Math.max(1, Math.ceil(sourceTriangles.length / 50000));
@@ -508,6 +541,74 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
   function toggleDecision(id: ExportDecision) {
     setSelectedDecisions(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
   }
+  function exportConfiguration() {
+    const text = JSON.stringify(exchangeConfiguration, null, 2);
+    downloadBlob(new Blob([text], { type: "application/json" }), `${safeExchangeName(mesh?.name)}_PrintPilot_configuration_v1.json`);
+    setExchangeStatus("Configuration JSON exportée. Elle ne contient ni facture, ni donnée de compte, ni photo.");
+  }
+  function exportCurrentStl() {
+    if (!mesh) { setExchangeStatus("Importe d’abord un STL ou un 3MF."); return; }
+    downloadBlob(binaryStl(mesh.name, mesh.triangles), `${safeExchangeName(mesh.name)}_orientation_${orientationId}.stl`);
+    setExchangeStatus(imported3mf ? "STL fusionné exporté. Les objets, couleurs, plateaux et réglages du 3MF ne peuvent pas être conservés dans un STL." : "STL exporté avec l’orientation actuellement affichée.");
+  }
+  function exportOriginal3mf() {
+    if (!imported3mf) return;
+    const exact = imported3mf.archive.slice().buffer as ArrayBuffer;
+    downloadBlob(new Blob([exact], { type: "model/3mf" }), `${safeExchangeName(mesh?.name)}_original.3mf`);
+    setExchangeStatus("Copie intacte du 3MF importé exportée.");
+  }
+  async function copyAgentPrompt() {
+    try {
+      if (navigator.clipboard) await navigator.clipboard.writeText(promptForAgent);
+      else {
+        const area = document.createElement("textarea"); area.value = promptForAgent; document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove();
+      }
+      setExchangeStatus("Prompt copié. Ajoute le JSON, le STL ou 3MF et tes photos dans la conversation avec l’agent.");
+    } catch { setExchangeStatus("Copie automatique impossible : sélectionne le prompt puis copie-le manuellement."); }
+  }
+  async function importConfiguration(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const imported = parsePrintPilotExchange(await file.text());
+      const criteria = imported.criteria;
+      const text = (key: string) => typeof criteria[key] === "string" ? String(criteria[key]) : null;
+      const boolean = (key: string) => typeof criteria[key] === "boolean" ? Boolean(criteria[key]) : null;
+      if (imported.machine.printer === "Creality Hi") setPrinter("hi");
+      else setPrinter("k2");
+      if (["0.4", "0.6"].includes(imported.machine.nozzleMm)) setNozzle(imported.machine.nozzleMm);
+      const importedFilament = inventory.find(item => item.id === imported.filament.id || item.label === imported.filament.label);
+      if (importedFilament) setFilamentId(importedFilament.id);
+      if (text("useCase")) setUseCase(text("useCase")!);
+      if (Array.isArray(criteria.secondaryUses)) setSecondaryUses(criteria.secondaryUses.map(String).slice(0, 2));
+      if (text("priority")) setPriority(text("priority")!);
+      if (text("precision")) setPrecision(text("precision")!);
+      if (boolean("visibleTop") != null) setVisibleTop(boolean("visibleTop")!);
+      if (text("loadDirection")) setLoadDirection(text("loadDirection")!);
+      if (text("environment")) setEnvironment(text("environment")!);
+      if (text("fitType")) setFitType(text("fitType")!);
+      if (text("supportAccess")) setSupportAccess(text("supportAccess")!);
+      if (text("exposure")) setExposure(text("exposure")!);
+      if (text("shapeClass")) setShapeClass(text("shapeClass")!);
+      if (text("undersideFinish")) setUndersideFinish(text("undersideFinish")!);
+      if (text("featureSize")) setFeatureSize(text("featureSize")!);
+      if (["balanced", "quality", "fast"].includes(text("mode") ?? "")) setMode(text("mode") as typeof mode);
+      setAppliedPreset(text("appliedPreset") ?? "");
+      const allowed: ExportDecision[] = ["layer", "walls", "shells", "infill", "support", "brim", "ironing"];
+      setSelectedDecisions(imported.selectedDecisions.filter((item): item is ExportDecision => allowed.includes(item as ExportDecision)));
+      const result = imported.printResult;
+      if (["success", "mixed", "failed"].includes(String(result.outcome))) setOutcome(String(result.outcome) as typeof outcome);
+      if (Number.isFinite(Number(result.qualityRating))) setQualityRating(Math.max(1, Math.min(5, Number(result.qualityRating))));
+      setDefects(String(result.defects ?? "")); setPrintNotes(String(result.notes ?? "")); setSlicedHours(String(result.slicedHours ?? "")); setSlicedMinutes(String(result.slicedMinutes ?? "")); setSlicedGrams(String(result.slicedGrams ?? ""));
+      if (result.electricityPricePerKwh != null) setElectricityPrice(String(result.electricityPricePerKwh));
+      if (result.averagePowerW != null) setAveragePower(String(result.averagePowerW));
+      const sameModel = Boolean(mesh && sourceFingerprint && imported.source.fingerprint === sourceFingerprint);
+      if (sameModel && imported.source.orientationId) chooseOrientation(imported.source.orientationId);
+      setStep(4);
+      setExchangeStatus(`${file.name} importé. ${sameModel ? "Le modèle correspond : l’orientation a été restaurée." : mesh ? "Attention : le modèle chargé ne correspond pas à l’empreinte du JSON ; son orientation n’a pas été modifiée." : "Charge ensuite le STL ou 3MF associé pour vérifier sa géométrie et son orientation."}${importedFilament ? "" : " La bobine référencée n’existe pas dans cet inventaire."}`);
+    } catch (error) { setExchangeStatus(error instanceof Error ? error.message : "Import JSON impossible."); }
+    finally { event.target.value = ""; }
+  }
   async function savePrint() {
     if (!user) { setPrintStatus("Connecte-toi pour enregistrer l’historique."); return; }
     const response = await fetch("/api/prints", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
@@ -524,14 +625,16 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     if (![".stl", ".3mf"].some(extension => file.name.toLowerCase().endsWith(extension))) { setFileState("error"); setError("Format non reconnu. Utilise un fichier STL ou 3MF."); return; }
     try {
       setFileState("loading");
+      const buffer = await file.arrayBuffer();
+      setSourceFingerprint(await fileFingerprint(buffer));
       if (file.name.toLowerCase().endsWith(".3mf")) {
-        const project = read3mfProject(await file.arrayBuffer());
+        const project = read3mfProject(buffer);
         const triangles = project.triangles as Triangle[];
         setImported3mf(project); setSourceTriangles(triangles); setMesh(analyseMesh(file.name, triangles));
         if (project.printerProfile?.toLowerCase().includes("creality hi")) setPrinter("hi");
         if (project.printerProfile?.includes("0.6")) setNozzle("0.6");
       } else {
-        const triangles = parseSTL(await file.arrayBuffer());
+        const triangles = parseSTL(buffer);
         setImported3mf(null); setSourceTriangles(triangles); setMesh(analyseMesh(file.name, triangles));
       }
       setFileState("idle"); setStep(2);
@@ -588,7 +691,8 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
         <section className="comparison-card"><div className="scope-head"><div><span>AVANT / APRÈS</span><h3>Choisis exactement ce que l’export modifie</h3></div><b>{selectedDecisions.length} / 7 appliqués</b></div><p>{imported3mf ? "Valeurs actuelles lues dans le 3MF. Décoche une ligne pour conserver sa valeur et sa configuration existantes." : "Le STL ne contient aucun réglage. Les lignes cochées surchargent le profil officiel Creality Hi ; les autres restent au profil officiel."}</p><div className="comparison-table"><div className="comparison-head"><span>Réglage</span><span>Actuel</span><span>Conseillé</span><span>Export</span></div>{comparisonRows.map(row => <label key={row.id} className={selectedDecisions.includes(row.id) ? "applied" : "preserved"}><b>{row.label}</b><span>{row.current}</span><strong>{row.recommended}</strong><span className="decision-toggle"><input type="checkbox" checked={selectedDecisions.includes(row.id)} onChange={() => toggleDecision(row.id)}/><i></i>{selectedDecisions.includes(row.id) ? "Appliquer" : "Conserver"}</span></label>)}</div>{experienceMode === "guided" && imported3mf && <small>Le mode Guidé masque les lignes déjà équivalentes. Passe en Expert pour tout voir.</small>}</section>
         <section className="scope-card"><div className="scope-head"><div><span>PORTÉE DE L’EXPORT</span><h3>Ce que PrintPilot a décidé</h3></div><b>{selectedDecisions.length} décisions</b></div><div className="scope-grid">{exportAudit.map(item => <div key={item.label}><span>{item.label}</span><b>{item.value}</b><small>{item.reason}</small></div>)}</div><details><summary>Réglages volontairement laissés intacts</summary><p><b>Tour de purge et CFS, purges, rétraction, ventilation, coutures, largeurs de ligne, plateau et ordre d’impression.</b> PrintPilot ne désactive donc pas une tour de purge simplement parce qu’elle semble inutile : ces paramètres restent ceux du 3MF importé ou du profil officiel. Les calibrations de la fiche bobine ne sont pas injectées automatiquement.</p></details></section>
         <section className="estimate-card"><div><span>APRÈS TRANCHAGE DANS CREALITY PRINT</span><h3>Calculer le coût à partir des vraies valeurs</h3><p>Recopie la durée et la masse affichées après « Trancher le plateau ». Le STL seul ne permet pas une estimation fiable.</p></div><div className="slice-input-grid"><label><span>Heures</span><input inputMode="decimal" min="0" type="number" value={slicedHours} onChange={e => setSlicedHours(e.target.value)} placeholder="2"/></label><label><span>Minutes</span><input inputMode="decimal" min="0" max="59" type="number" value={slicedMinutes} onChange={e => setSlicedMinutes(e.target.value)} placeholder="35"/></label><label><span>Filament utilisé</span><div><input inputMode="decimal" min="0" type="number" value={slicedGrams} onChange={e => setSlicedGrams(e.target.value)} placeholder="84"/><em>g</em></div></label><label><span>Électricité</span><div><input inputMode="decimal" min="0" step="0.01" type="number" value={electricityPrice} onChange={e => setElectricityPrice(e.target.value)}/><em>€/kWh</em></div></label><label><span>Puissance moyenne</span><div><input inputMode="decimal" min="0" type="number" value={averagePower} onChange={e => setAveragePower(e.target.value)}/><em>W</em></div></label></div><div className="estimate-grid"><div><small>Matière</small><b>{slicedCost.materialCost == null ? "Prix/kg manquant" : `${fmt(slicedCost.materialCost, 2)} €`}</b></div><div><small>Électricité estimée</small><b>{slicedCost.energyCost == null ? "Durée manquante" : `${fmt(slicedCost.energyCost, 2)} €`}</b></div><div><small>Total direct</small><b>{slicedCost.totalCost == null ? "Données manquantes" : `${fmt(slicedCost.totalCost, 2)} €`}</b></div></div><p className="estimate-note">Matière = grammes tranchés × {filament.pricePerKg != null ? `${fmt(filament.pricePerKg, 2)} €/kg` : "prix/kg à renseigner dans la bobine"}. Électricité = durée × puissance moyenne × tarif. Le total n’inclut ni amortissement, ni maintenance, ni temps humain.</p></section>
-        <section className="print-memory-card"><div><span>APRÈS L’IMPRESSION</span><h3>Apprendre de tes vrais résultats</h3><p>{successfulWithFilament > 1 ? `${successfulWithFilament} impressions réussies sont déjà enregistrées. PrintPilot affiche cette mémoire sans remplacer automatiquement tes profils.` : "Enregistre le résultat réel pour construire une mémoire fiable. Une seule impression ne modifiera jamais automatiquement un profil."}</p></div><div className="outcome-row">{([['success','Réussie'],['mixed','À améliorer'],['failed','Échec']] as const).map(([id, label]) => <button key={id} className={outcome === id ? `active ${id}` : ""} onClick={() => setOutcome(id)}>{label}</button>)}</div><div className="rating-row"><span>Qualité</span>{[1,2,3,4,5].map(value => <button key={value} className={qualityRating >= value ? "active" : ""} onClick={() => setQualityRating(value)}>★</button>)}</div><div className="memory-fields"><label><span>Défauts observés</span><input value={defects} onChange={event => setDefects(event.target.value)} placeholder="Stringing, warping, support difficile…"/></label><label><span>Notes</span><input value={printNotes} onChange={event => setPrintNotes(event.target.value)} placeholder="Ce que tu referais différemment"/></label></div><button className="secondary" onClick={() => void savePrint()}>Enregistrer cette impression</button>{printStatus && <p className="form-message">{printStatus}</p>}</section>
+        <section className="print-memory-card"><div><span>APRÈS L’IMPRESSION</span><h3>Noter le résultat</h3><p>{successfulWithFilament > 1 ? `${successfulWithFilament} impressions réussies sont enregistrées avec cette bobine.` : "Ces informations servent à ton historique et au dossier exporté."} Elles ne modifient jamais automatiquement les conseils ou les réglages.</p></div><div className="outcome-row">{([['success','Réussie'],['mixed','À améliorer'],['failed','Échec']] as const).map(([id, label]) => <button key={id} className={outcome === id ? `active ${id}` : ""} onClick={() => setOutcome(id)}>{label}</button>)}</div><div className="rating-row"><span>Qualité</span>{[1,2,3,4,5].map(value => <button key={value} className={qualityRating >= value ? "active" : ""} onClick={() => setQualityRating(value)}>★</button>)}</div><div className="memory-fields"><label><span>Défauts observés</span><input value={defects} onChange={event => setDefects(event.target.value)} placeholder="Stringing, warping, support difficile…"/></label><label><span>Notes</span><input value={printNotes} onChange={event => setPrintNotes(event.target.value)} placeholder="Ce que tu voudrais montrer à l’agent"/></label></div><button className="secondary" onClick={() => void savePrint()}>Enregistrer dans l’historique</button>{printStatus && <p className="form-message">{printStatus}</p>}</section>
+        <section className="agent-exchange-card"><div className="scope-head"><div><span>DOSSIER POUR UN AGENT</span><h3>Exporte seulement ce dont tu as besoin</h3></div><b>100 % local</b></div><p>PrintPilot ne stocke aucun dossier supplémentaire. Télécharge les fichiers séparément, puis joins toi-même le JSON, le modèle et tes photos à l’agent de ton choix.</p><input ref={configInputRef} type="file" accept=".json,application/json" hidden onChange={importConfiguration}/><div className="exchange-actions"><button className="secondary" onClick={exportConfiguration}>Exporter la configuration JSON</button><button className="secondary" onClick={() => configInputRef.current?.click()}>Importer une configuration JSON</button><button className="secondary" disabled={!mesh} onClick={exportCurrentStl}>{imported3mf ? "Exporter un STL fusionné" : "Exporter le STL orienté"}</button>{imported3mf && <button className="secondary" onClick={exportOriginal3mf}>Réexporter le 3MF original</button>}</div><label className="prompt-preview"><span>Prompt préparé automatiquement</span><textarea readOnly rows={12} value={promptForAgent} onFocus={event => event.currentTarget.select()}/></label><button className="primary" onClick={() => void copyAgentPrompt()}>Copier le prompt</button>{exchangeStatus && <p className="exchange-status">{exchangeStatus}</p>}<small>Pour un diagnostic utile, joins au minimum le JSON et le modèle. Ajoute des photos nettes du défaut, une vue générale et, si nécessaire, une capture de l’aperçu du G-code.</small></section>
         <section className="export-card"><div><span>PROJET 3MF V6</span><h3>{imported3mf ? "Exporter le projet existant avec les choix appliqués" : "Exporter le STL avec les réglages appliqués"}</h3><p>{imported3mf && orientationId === "current" ? "La géométrie, les objets, les plateaux et tous les réglages non cochés du 3MF original sont conservés." : "Un nouveau projet Creality Hi est créé avec l’orientation affichée et uniquement les catégories cochées ci-dessus."}</p></div><button className="primary" onClick={exportProject} disabled={!mesh || nozzle !== "0.4"}>Exporter le projet 3MF</button>{exportStatus && <p className="export-status">{exportStatus}</p>}<small>Export ciblé : Creality Hi, buse 0,4 mm. Les modifications sont déclarées dans <code>different_settings_to_system</code> pour que Creality Print les reconnaisse. Vérifie ensuite le profil machine et l’aperçu couche par couche.</small></section>
         {recommendation.cautions.length > 0 && <div className="cautions">{recommendation.cautions.map(c => <p key={c}><b>À surveiller</b>{c}</p>)}</div>}
         <div className="reasoning"><b>Pourquoi cette configuration ?</b><p>{useCase === "functional" ? "La pièce est fonctionnelle : les parois portent l’essentiel de la résistance, avec un remplissage raisonnable." : "Le réglage suit ton usage et ta priorité."} {loadDirection === "z" ? "Le risque de rupture entre couches est signalé : réoriente la pièce avant d’augmenter simplement le remplissage." : "L’orientation reste le premier levier avant les supports et le remplissage."}</p></div>

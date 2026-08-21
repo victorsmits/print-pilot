@@ -51,7 +51,7 @@ export async function readInvoicePdf(file: File): Promise<InvoiceDraft> {
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
     const page = await document.getPage(pageNumber);
     const content = await page.getTextContent();
-    pages.push(content.items.map(item => "str" in item ? item.str : "").join(" "));
+    pages.push(content.items.map((item: unknown) => item && typeof item === "object" && "str" in item ? String(item.str) : "").join(" "));
   }
   const text = pages.join("\n").replace(/\s+/g, " ").trim();
   if (text.length < 30) throw new Error("Ce PDF semble être une image scannée. L’OCR n’est pas encore disponible ; utilise une facture PDF contenant du texte.");

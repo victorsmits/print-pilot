@@ -69,7 +69,7 @@ export function read3mfProject(buffer: ArrayBuffer): Imported3mfProject {
       const vertices = [...mesh.querySelectorAll("vertices > vertex")].map(vertex => [
         Number(vertex.getAttribute("x")), Number(vertex.getAttribute("y")), Number(vertex.getAttribute("z")),
       ] as ImportedVec3);
-      const transformed = vertices.map(vertex => transforms.reduce((value, transform) => applyTransform(value, transform), vertex));
+      const transformed = vertices.map(vertex => transforms.reduce<ImportedVec3>((value, transform) => applyTransform(value, transform), vertex));
       mesh.querySelectorAll("triangles > triangle").forEach(node => {
         const a = transformed[Number(node.getAttribute("v1"))], b = transformed[Number(node.getAttribute("v2"))], c = transformed[Number(node.getAttribute("v3"))];
         if (a && b && c) triangles.push(triangle(a, b, c));
