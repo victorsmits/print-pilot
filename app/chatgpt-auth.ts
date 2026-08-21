@@ -17,6 +17,9 @@ const SIGN_OUT_PATH = "/signout-with-chatgpt";
 const CALLBACK_PATH = "/callback";
 
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
+  const selfHostedUser = await getSelfHostedUser();
+  if (selfHostedUser) return selfHostedUser;
+
   const requestHeaders = await headers();
   const email = requestHeaders.get(USER_EMAIL_HEADER);
   if (!email) return null;
@@ -33,6 +36,24 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
     email,
     fullName,
   };
+}
+
+async function getSelfHostedUser(): Promise<ChatGPTUser | null> {
+  try {
+    const { env } = await import("cloudflare:workers");
+    const workerEnv = env as unknown as Record<string, unknown>;
+    if (String(workerEnv.SELF_HOSTED ?? "").toLowerCase() !== "true") return null;
+
+    const email = String(workerEnv.SELF_HOSTED_USER_EMAIL ?? "owner@printpilot.local").trim().toLowerCase();
+    const fullName = String(workerEnv.SELF_HOSTED_USER_NAME ?? "Propriétaire PrintPilot").trim() || null;
+    return {
+      displayName: fullName ?? email,
+      email: email || "owner@printpilot.local",
+      fullName,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function requireChatGPTUser(

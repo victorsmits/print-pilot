@@ -1,0 +1,31 @@
+services:
+  printpilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: printpilot-hi:latest
+    container_name: printpilot-hi
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${PRINTPILOT_PORT:-3000}:3000"
+    environment:
+      SELF_HOSTED: "true"
+      SELF_HOSTED_USER_EMAIL: "${SELF_HOSTED_USER_EMAIL:-owner@printpilot.local}"
+      SELF_HOSTED_USER_NAME: "${SELF_HOSTED_USER_NAME:-Propriétaire PrintPilot}"
+      PORT: "3000"
+    volumes:
+      - printpilot_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/filaments').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+volumes:
+  printpilot_data:

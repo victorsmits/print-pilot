@@ -1,4 +1,50 @@
-# vinext-starter
+# PrintPilot Hi
+
+Assistant personnel pour analyser un STL ou un projet 3MF, choisir des réglages adaptés à une Creality Hi, gérer un inventaire de filaments et exporter un projet Creality Print contrôlé.
+
+## Auto-hébergement avec Docker
+
+Cette édition fonctionne entièrement en local. Wrangler fournit le moteur Cloudflare Workers et une base D1 locale persistée dans un volume Docker : aucun compte Cloudflare ni service ChatGPT n’est nécessaire.
+
+### Démarrage
+
+```sh
+cp selfhost.env.example .env
+docker compose up -d --build
+```
+
+L’application est ensuite disponible sur `http://localhost:3000`. Pour utiliser un autre port, modifiez `PRINTPILOT_PORT` dans `.env`.
+
+### Données et mises à jour
+
+- L’inventaire et l’historique sont conservés dans le volume `printpilot_data`.
+- Les migrations de base de données sont appliquées automatiquement au démarrage.
+- `docker compose down` conserve les données.
+- `docker compose down -v` supprime définitivement la base locale.
+- Pour mettre à jour : récupérez les nouveaux commits puis relancez `docker compose up -d --build`.
+
+### Identité et sécurité
+
+Le mode Docker est prévu par défaut pour un seul utilisateur. `SELF_HOSTED_USER_EMAIL` sert d’identifiant de propriété pour les données et doit rester stable. Il ne constitue pas un mécanisme de connexion.
+
+Si l’application est exposée hors de votre réseau privé, placez-la derrière votre authentification habituelle ou un VPN. Ne publiez pas directement le port 3000 sur Internet.
+
+### Sauvegarde
+
+Pour sauvegarder tout le volume :
+
+```sh
+docker run --rm -v printpilot-hi_printpilot_data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/printpilot-data.tar.gz -C /data .
+```
+
+Le nom réel du volume peut varier avec le nom du dossier ou le nom de projet Compose. Utilisez `docker volume ls` si nécessaire.
+
+### Utilisation sans Docker
+
+Le projet reste compatible avec son environnement Vinext/Cloudflare d’origine. Les commandes de développement sont décrites plus bas.
+
+## Architecture d’origine
 
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and

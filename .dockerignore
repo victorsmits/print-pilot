@@ -1,0 +1,12 @@
+.git
+.next
+.sites-runtime
+.wrangler
+dist
+node_modules
+outputs
+work
+.env
+.env.*
+!selfhost.env.example
+npm-debug.log*
