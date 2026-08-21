@@ -11,6 +11,11 @@ services:
       - "${PRINTPILOT_PORT:-3000}:3000"
     environment:
       SELF_HOSTED: "true"
+      AUTH_DISABLED: "${AUTH_DISABLED:-false}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
+      PUBLIC_APP_URL: "${PUBLIC_APP_URL:-}"
       SELF_HOSTED_USER_EMAIL: "${SELF_HOSTED_USER_EMAIL:-owner@printpilot.local}"
       SELF_HOSTED_USER_NAME: "${SELF_HOSTED_USER_NAME:-Propriétaire PrintPilot}"
       PORT: "3000"
@@ -21,7 +26,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:3000/api/filaments').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 10s
       retries: 5
