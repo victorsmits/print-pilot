@@ -45,6 +45,15 @@ AUTH_DISABLED=false
 
 `PUBLIC_APP_URL` et l’URI enregistrée chez Google doivent correspondre exactement, port compris. Pour un domaine public, utilisez HTTPS et remplacez l’URI par `https://votre-domaine/auth/google/callback`.
 
+Si les journaux indiquent `TLS peer's certificate is not trusted`, reconstruisez l’image Docker à jour : elle installe explicitement le bundle d’autorités de certification utilisé par `workerd`.
+
+```sh
+docker compose build --no-cache printpilot
+docker compose up -d --force-recreate
+```
+
+Sur un réseau d’entreprise qui intercepte HTTPS, le certificat racine interne doit également être ajouté au conteneur via `NODE_EXTRA_CA_CERTS` ou `SSL_CERT_FILE`. Ne désactivez pas la validation TLS.
+
 Pour un dépannage local temporaire uniquement, `AUTH_DISABLED=true` réactive le compte local défini par `SELF_HOSTED_USER_EMAIL`. Ne l’utilisez pas sur une instance accessible depuis Internet.
 
 #### Reprendre les données du compte local
