@@ -1,0 +1,14 @@
+app/api/filaments/route.ts
+  h_37c6767948b603 47,51-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "002518a811e1e9cc1e4d6d5290c68aea77afc67c",
+  "prompts": {},
+  "humans": {
+    "h_37c6767948b603": {
+      "author": "victor-smits <contact@victorsmits.com>"
+    }
+  }
+}
