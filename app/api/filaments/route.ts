@@ -44,11 +44,19 @@ export async function GET() {
     let rows = await db.select().from(filaments).where(eq(filaments.userEmail, user.email)).orderBy(desc(filaments.updatedAt));
     if (rows.length === 0) {
       const now = new Date().toISOString();
-      await db.insert(filaments).values(INITIAL_FILAMENTS.map(([brand, productLine, material, colorName, colorHex]) => ({
+      const seedRows = INITIAL_FILAMENTS.map(([brand, productLine, material, colorName, colorHex]) => ({
         userEmail: user.email, brand, productLine, material, colorName, colorHex,
         profileName: null, calibrated: false, abrasive: material === "PLA Wood", cfsCompatible: material !== "PLA Wood",
         notes: material === "PLA Wood" ? "À calibrer ; vérifier la buse et le débit." : "À calibrer.", createdAt: now, updatedAt: now,
-      }))).onConflictDoNothing();
+      }));
+
+      // D1 accepte au maximum 100 paramètres liés par requête. Les 10 lignes
+      // dépassent cette limite lorsqu'elles sont insérées en une seule fois.
+      // `batch` exécute les deux petites insertions dans une même transaction.
+      await db.batch([
+        db.insert(filaments).values(seedRows.slice(0, 5)),
+        db.insert(filaments).values(seedRows.slice(5)),
+      ]);
       rows = await db.select().from(filaments).where(eq(filaments.userEmail, user.email)).orderBy(desc(filaments.updatedAt));
     }
     return Response.json({ filaments: rows });
