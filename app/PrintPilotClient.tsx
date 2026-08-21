@@ -3,7 +3,9 @@
 import { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import AccountPanel from "./AccountPanel";
 import InventoryPanel from "./InventoryPanel";
-import { buildCrealityProject } from "./threeMfExport";
+import PrintHistoryPanel, { type PrintRun } from "./PrintHistoryPanel";
+import { buildCrealityProject, type ExportDecision } from "./threeMfExport";
+import { read3mfProject, settingString, type Imported3mfProject } from "./threeMfImport";
 
 type Vec3 = [number, number, number];
 type Triangle = { a: Vec3; b: Vec3; c: Vec3; normal: Vec3; area: number };
@@ -46,6 +48,14 @@ export type InventoryFilament = {
   spoolWeightG?: number | null;
   remainingG?: number | null;
   pricePerKg?: number | null;
+  supplier?: string | null;
+  purchaseDate?: string | null;
+  invoiceNumber?: string | null;
+  purchaseTotal?: number | null;
+  purchaseQuantity?: number | null;
+  cfsSlot?: string | null;
+  nozzleDiameter?: number | null;
+  lastDriedAt?: string | null;
   lotNumber?: string | null;
   openedAt?: string | null;
   storageLocation?: string | null;
@@ -220,6 +230,20 @@ export function analyseMesh(name: string, triangles: Triangle[]): MeshStats {
   return { name, triangles: orientedTriangles, size, volumeCm3: Math.abs(signedVolume) / 1000, surfaceAreaMm2, overhangPercent: current.support, overhangAreaMm2: current.supportArea, baseScore: current.base, orientation, orientationNote: gain > 2 ? `Estimation : environ ${gain.toFixed(1)} points de surface à supporter en moins.` : "Le Z minimum du STL est posé sur le plateau ; cette orientation est déjà proche du meilleur compromis détecté." };
 }
 
+const ORIENTATIONS = [
+  { id: "current", label: "Actuelle", rotate: ([x, y, z]: Vec3): Vec3 => [x, y, z] },
+  { id: "x-plus", label: "Côté X", rotate: ([x, y, z]: Vec3): Vec3 => [x, -z, y] },
+  { id: "x-minus", label: "Côté X opposé", rotate: ([x, y, z]: Vec3): Vec3 => [x, z, -y] },
+  { id: "y-plus", label: "Côté Y", rotate: ([x, y, z]: Vec3): Vec3 => [z, y, -x] },
+  { id: "y-minus", label: "Côté Y opposé", rotate: ([x, y, z]: Vec3): Vec3 => [-z, y, x] },
+  { id: "upside-down", label: "Retournée", rotate: ([x, y, z]: Vec3): Vec3 => [x, -y, -z] },
+] as const;
+
+function rotateTriangles(triangles: Triangle[], orientationId: string) {
+  const orientation = ORIENTATIONS.find(item => item.id === orientationId) ?? ORIENTATIONS[0];
+  return triangles.map(item => triangle(orientation.rotate(item.a), orientation.rotate(item.b), orientation.rotate(item.c)));
+}
+
 function fmt(n: number, digits = 0) { return Number.isFinite(n) ? n.toFixed(digits).replace(".", ",") : "—"; }
 
 function ModelCanvas({ stats }: { stats: MeshStats | null }) {
@@ -271,14 +295,28 @@ function InfoLabel({ children, item }: { children: string; item: CriteriaHelpKey
 export type AccountUser = { displayName: string; email: string } | null;
 
 export default function PrintPilotClient({ user }: { user: AccountUser }) {
-  const [mesh, setMesh] = useState<MeshStats | null>(null), [fileState, setFileState] = useState<"idle" | "loading" | "error" | "manual">("idle"), [error, setError] = useState(""), [step, setStep] = useState(1);
+  const [mesh, setMesh] = useState<MeshStats | null>(null), [fileState, setFileState] = useState<"idle" | "loading" | "error">("idle"), [error, setError] = useState(""), [step, setStep] = useState(1);
   const [useCase, setUseCase] = useState("functional"), [secondaryUses, setSecondaryUses] = useState<string[]>([]), [priority, setPriority] = useState("balance"), [precision, setPrecision] = useState("standard"), [visibleTop, setVisibleTop] = useState(true), [loadDirection, setLoadDirection] = useState("faible");
   const [environment, setEnvironment] = useState("inside"), [fitType, setFitType] = useState("none"), [supportAccess, setSupportAccess] = useState("easy"), [exposure, setExposure] = useState("normal");
   const [shapeClass, setShapeClass] = useState("prismatic"), [undersideFinish, setUndersideFinish] = useState("standard"), [featureSize, setFeatureSize] = useState("normal"), [nozzle, setNozzle] = useState("0.4");
   const [filamentId, setFilamentId] = useState(FILAMENTS[0].id), [printer, setPrinter] = useState("hi"), [mode, setMode] = useState<"balanced" | "quality" | "fast">("balanced"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
   const [inventory, setInventory] = useState<InventoryFilament[]>(FILAMENTS), [inventoryOpen, setInventoryOpen] = useState(false), [inventoryLoading, setInventoryLoading] = useState(false), [accountOpen, setAccountOpen] = useState(false), [exportStatus, setExportStatus] = useState("");
   const [appliedPreset, setAppliedPreset] = useState(""), [slicedHours, setSlicedHours] = useState(""), [slicedMinutes, setSlicedMinutes] = useState(""), [slicedGrams, setSlicedGrams] = useState(""), [electricityPrice, setElectricityPrice] = useState("0.30"), [averagePower, setAveragePower] = useState("120");
+  const [imported3mf, setImported3mf] = useState<Imported3mfProject | null>(null), [sourceTriangles, setSourceTriangles] = useState<Triangle[]>([]), [orientationId, setOrientationId] = useState("current");
+  const [selectedDecisions, setSelectedDecisions] = useState<ExportDecision[]>(["layer", "walls", "shells", "infill", "support", "brim", "ironing"]);
+  const [experienceMode, setExperienceMode] = useState<"guided" | "expert">("guided"), [historyOpen, setHistoryOpen] = useState(false), [historyLoading, setHistoryLoading] = useState(false), [prints, setPrints] = useState<PrintRun[]>([]);
+  const [outcome, setOutcome] = useState<"success" | "mixed" | "failed">("success"), [qualityRating, setQualityRating] = useState(4), [defects, setDefects] = useState(""), [printNotes, setPrintNotes] = useState(""), [printStatus, setPrintStatus] = useState("");
   const inputRef = useRef<HTMLInputElement>(null), filament = inventory.find(f => f.id === filamentId) ?? inventory[0] ?? FILAMENTS[0];
+
+  async function reloadPrints() {
+    if (!user) return;
+    setHistoryLoading(true);
+    try {
+      const response = await fetch("/api/prints", { cache: "no-store" });
+      const payload = await response.json() as { prints?: PrintRun[] };
+      if (response.ok && payload.prints) setPrints(payload.prints);
+    } finally { setHistoryLoading(false); }
+  }
 
   async function reloadInventory() {
     if (!user) return;
@@ -316,6 +354,18 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
       .catch(() => { /* Le catalogue local reste disponible hors ligne. */ });
     return () => { active = false; };
   }, [user]);
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    fetch("/api/prints", { cache: "no-store" }).then(async response => ({ ok: response.ok, payload: await response.json() as { prints?: PrintRun[] } })).then(({ ok, payload }) => {
+      if (active && ok && payload.prints) setPrints(payload.prints);
+    }).catch(() => { /* L’historique reste simplement vide hors ligne. */ });
+    return () => { active = false; };
+  }, [user]);
+
+  function changeExperienceMode(value: "guided" | "expert") {
+    setExperienceMode(value);
+  }
   function choosePrimaryUse(id: string) {
     setUseCase(id);
     setSecondaryUses(current => current.filter(value => value !== id));
@@ -391,6 +441,29 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     const totalCost = materialCost != null && energyCost != null ? materialCost + energyCost : null;
     return { hours, grams, materialCost, energyCost, totalCost };
   }, [slicedHours, slicedMinutes, slicedGrams, electricityPrice, averagePower, filament.pricePerKg]);
+  const orientationChoices = useMemo(() => {
+    if (!sourceTriangles.length || (imported3mf?.plateCount ?? 1) > 1) return [];
+    return ORIENTATIONS.map(item => {
+      const stats = analyseMesh(mesh?.name ?? "modèle", rotateTriangles(sourceTriangles, item.id));
+      const score = stats.overhangPercent + stats.size[2] / 100 - stats.baseScore * 0.12;
+      return { ...item, stats, score };
+    }).sort((a, b) => a.score - b.score);
+  }, [sourceTriangles, imported3mf?.plateCount, mesh?.name]);
+  const comparisonRows = useMemo(() => {
+    const config = imported3mf?.projectSettings ?? {};
+    const current = (key: string, fallback = "Non défini") => settingString(config, key) ?? (imported3mf ? fallback : "Profil officiel");
+    const rows: Array<{ id: ExportDecision; label: string; current: string; recommended: string }> = [
+      { id: "layer", label: "Hauteur de couche", current: current("layer_height"), recommended: recommendation.layer.replace(",", ".") },
+      { id: "walls", label: "Parois", current: current("wall_loops"), recommended: String(recommendation.walls) },
+      { id: "shells", label: "Dessus / dessous", current: `${current("top_shell_layers")} / ${current("bottom_shell_layers")}`, recommended: `${recommendation.base.top} / ${recommendation.base.bottom}` },
+      { id: "infill", label: "Remplissage", current: `${current("sparse_infill_density")} · ${current("sparse_infill_pattern")}`, recommended: `${recommendation.infill}% · ${recommendation.pattern}` },
+      { id: "support", label: "Supports", current: current("enable_support", "Désactivés") === "1" ? "Activés" : "Désactivés", recommended: recommendation.supportPlan.enabled ? recommendation.support : "Désactivés" },
+      { id: "brim", label: "Bordure", current: current("brim_type"), recommended: recommendation.brim },
+      { id: "ironing", label: "Lissage", current: current("ironing_type", "Désactivé"), recommended: recommendation.ironing },
+    ];
+    return experienceMode === "expert" ? rows : rows.filter(row => !imported3mf || row.current.toLowerCase() !== row.recommended.toLowerCase());
+  }, [imported3mf, recommendation, experienceMode]);
+  const successfulWithFilament = prints.filter(run => run.outcome === "success" && (filament.dbId == null || run.filamentId === filament.dbId)).length;
   const exportAudit = [
     { label: "Profil / couche", value: recommendation.layer, reason: "Choisi selon précision et priorité" },
     { label: "Parois", value: `${recommendation.walls}`, reason: "Adaptées aux usages sélectionnés" },
@@ -407,31 +480,70 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
       triangles: mesh.triangles,
       nozzle,
       filament,
+      decisions: selectedDecisions,
+      source3mf: imported3mf && orientationId === "current" ? { archive: imported3mf.archive, projectSettings: imported3mf.projectSettings } : undefined,
       settings: { layer: recommendation.layer, walls: recommendation.walls, topLayers: recommendation.base.top, bottomLayers: recommendation.base.bottom, infill: recommendation.infill, infillPattern: recommendation.pattern, outerWallSpeed: recommendation.base.outer, innerWallSpeed: recommendation.base.inner, infillSpeed: recommendation.base.infill, topSpeed: recommendation.base.topSpeed, acceleration: recommendation.base.acceleration, brim: recommendation.brim, ironing: recommendation.ironing, support: recommendation.supportPlan },
     });
     const url = URL.createObjectURL(project.blob), anchor = document.createElement("a");
     anchor.href = url; anchor.download = project.filename; anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-    setExportStatus(`3MF v5 créé : ${project.appliedKeys.length} réglages PrintPilot sont déclarés et appliqués sur le profil Creality Hi complet. Ouvre-le comme projet.`);
+    setExportStatus(`3MF v6 créé : ${project.appliedKeys.length} clés appliquées. ${imported3mf && orientationId === "current" ? "La structure, les plateaux et les réglages non cochés du 3MF original sont conservés." : "Un nouveau projet Creality Hi a été construit avec l’orientation choisie."}`);
   }
-  async function loadFile(file: File) { setError(""); if (file.name.toLowerCase().endsWith(".3mf")) { setFileState("manual"); setMesh(null); setStep(2); return; } if (!file.name.toLowerCase().endsWith(".stl")) { setFileState("error"); setError("Format non reconnu. Utilise un fichier STL ou 3MF."); return; } try { setFileState("loading"); setMesh(analyseMesh(file.name, parseSTL(await file.arrayBuffer()))); setFileState("idle"); setStep(2); } catch (e) { setFileState("error"); setError(e instanceof Error ? e.message : "Impossible d’analyser ce fichier."); } }
+  function chooseOrientation(id: string) {
+    const choice = orientationChoices.find(item => item.id === id);
+    if (!choice) return;
+    setOrientationId(id); setMesh(choice.stats);
+  }
+  function toggleDecision(id: ExportDecision) {
+    setSelectedDecisions(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
+  }
+  async function savePrint() {
+    if (!user) { setPrintStatus("Connecte-toi pour enregistrer l’historique."); return; }
+    const response = await fetch("/api/prints", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+      name: mesh?.name ?? "Projet PrintPilot", sourceFileName: mesh?.name, filamentId: filament.dbId ?? null, durationMinutes: Math.round(slicedCost.hours * 60) || null,
+      filamentUsedG: slicedCost.grams || null, materialCost: slicedCost.materialCost, energyCost: slicedCost.energyCost, totalCost: slicedCost.totalCost,
+      outcome, qualityRating, defects, notes: printNotes, settings: { recommendation, selectedDecisions, orientationId, filament: filament.label },
+    }) });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) { setPrintStatus(payload.error ?? "Enregistrement impossible."); return; }
+    setPrintStatus("Impression ajoutée à la mémoire PrintPilot."); setDefects(""); setPrintNotes(""); await reloadPrints();
+  }
+  async function loadFile(file: File) {
+    setError(""); setExportStatus(""); setOrientationId("current");
+    if (![".stl", ".3mf"].some(extension => file.name.toLowerCase().endsWith(extension))) { setFileState("error"); setError("Format non reconnu. Utilise un fichier STL ou 3MF."); return; }
+    try {
+      setFileState("loading");
+      if (file.name.toLowerCase().endsWith(".3mf")) {
+        const project = read3mfProject(await file.arrayBuffer());
+        const triangles = project.triangles as Triangle[];
+        setImported3mf(project); setSourceTriangles(triangles); setMesh(analyseMesh(file.name, triangles));
+        if (project.printerProfile?.toLowerCase().includes("creality hi")) setPrinter("hi");
+        if (project.printerProfile?.includes("0.6")) setNozzle("0.6");
+      } else {
+        const triangles = parseSTL(await file.arrayBuffer());
+        setImported3mf(null); setSourceTriangles(triangles); setMesh(analyseMesh(file.name, triangles));
+      }
+      setFileState("idle"); setStep(2);
+    } catch (e) { setFileState("error"); setError(e instanceof Error ? e.message : "Impossible d’analyser ce fichier."); }
+  }
   const choose = (e: ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) loadFile(file); }, drop = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); const file = e.dataTransfer.files?.[0]; if (file) loadFile(file); };
   return <main><TutorialPanel item={tutorial} onClose={() => setTutorial(null)} />
     {inventoryOpen && <InventoryPanel inventory={inventory} loading={inventoryLoading} onReload={reloadInventory} onClose={() => setInventoryOpen(false)} />}
+    {historyOpen && <PrintHistoryPanel prints={prints} loading={historyLoading} onClose={() => setHistoryOpen(false)} />}
     {accountOpen && <AccountPanel user={user} inventoryCount={inventory.length} onClose={() => setAccountOpen(false)} />}
-    <header className="topbar"><a className="brand" href="#top"><span className="brand-mark">P</span><span>PRINTPILOT <b>HI</b></span></a><div className="machine-strip"><span className="status-dot"></span><label>Imprimante<select value={printer} onChange={e => setPrinter(e.target.value)}><option value="hi">Creality Hi</option><option value="k2">Creality K2 / autre</option></select></label><label>Buse<select value={nozzle} onChange={e => setNozzle(e.target.value)}><option value="0.4">0,4 mm</option><option value="0.6">0,6 mm</option></select></label><span className="machine-spec">260 × 260 × 300</span></div><div className="top-actions"><button className="ghost" onClick={() => setInventoryOpen(true)}>Inventaire <b>{inventory.length}</b></button><button className="account-button" onClick={() => setAccountOpen(true)}><span>{(user?.displayName ?? "V").charAt(0).toUpperCase()}</span><i>{user?.displayName ?? "Compte"}</i></button></div></header>
+    <header className="topbar"><a className="brand" href="#top"><span className="brand-mark">P</span><span>PRINTPILOT <b>HI</b></span></a><div className="machine-strip"><span className="status-dot"></span><label>Imprimante<select value={printer} onChange={e => setPrinter(e.target.value)}><option value="hi">Creality Hi</option><option value="k2">Creality K2 / autre</option></select></label><label>Buse<select value={nozzle} onChange={e => setNozzle(e.target.value)}><option value="0.4">0,4 mm</option><option value="0.6">0,6 mm</option></select></label><span className="machine-spec">260 × 260 × 300</span></div><div className="top-actions"><div className="experience-switch" aria-label="Niveau d’explication"><button className={experienceMode === "guided" ? "active" : ""} onClick={() => changeExperienceMode("guided")}>Guidé</button><button className={experienceMode === "expert" ? "active" : ""} onClick={() => changeExperienceMode("expert")}>Expert</button></div><button className="ghost" onClick={() => { setHistoryOpen(true); void reloadPrints(); }}>Historique <b>{prints.length}</b></button><button className="ghost" onClick={() => setInventoryOpen(true)}>Inventaire <b>{inventory.length}</b></button><button className="account-button" onClick={() => setAccountOpen(true)}><span>{(user?.displayName ?? "V").charAt(0).toUpperCase()}</span><i>{user?.displayName ?? "Compte"}</i></button></div></header>
     {printer !== "hi" && <div className="printer-warning"><b>Attention : mauvais profil machine.</b> Après l’ouverture d’un 3MF, Creality Print peut sélectionner une K2. Remets « Creality Hi » pour retrouver les bons profils.</div>}
     <section className="hero" id="top"><div className="hero-copy"><span className="eyebrow">ASSISTANT PERSONNEL · CREALITY HI</span><h1>Le bon profil.<br/><em>Les bons supports.</em><br/>Avant d’imprimer.</h1><p>Importe une pièce, combine géométrie, usage et bobine réelle, puis obtiens une configuration expliquée — avec le chemin exact dans Creality Print.</p></div><div className="hero-metric"><span>Moteur de décision basé sur</span><b>GÉOMÉTRIE</b><b>USAGE</b><b>INVENTAIRE</b></div></section>
     <nav className="steps">{["Modèle", "Usage", "Filament", "Configuration"].map((label, i) => <button key={label} className={step === i + 1 ? "active" : step > i + 1 ? "done" : ""} onClick={() => setStep(i + 1)}><span>{step > i + 1 ? "✓" : String(i + 1).padStart(2, "0")}</span>{label}</button>)}</nav>
     <section className="workspace"><div className="stage">
-      {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : analyse automatique complète<br/>3MF : questionnaire guidé dans cette version</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>Glisser pour tourner</span></div><p className="orientation-assumption">Orientation analysée : axes du STL conservés, point Z le plus bas posé sur le plateau.</p></div></div><button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
+      {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : géométrie et orientation<br/>3MF : géométrie, plateaux et réglages existants</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>Glisser pour tourner</span></div><p className="orientation-assumption">Orientation analysée : position réelle du fichier, point Z le plus bas posé sur le plateau pour un STL.</p></div></div>{imported3mf && <section className="import-summary"><div><span>PROJET 3MF LU</span><b>{imported3mf.objectCount} objet(s) · {imported3mf.plateCount} plateau(x)</b></div><dl><div><dt>Application</dt><dd>{imported3mf.sourceApplication ?? "Inconnue"}</dd></div><div><dt>Imprimante</dt><dd>{imported3mf.printerProfile ?? "Non définie"}</dd></div><div><dt>Processus</dt><dd>{imported3mf.processProfile ?? "Non défini"}</dd></div><div><dt>Filament(s)</dt><dd>{imported3mf.filamentProfiles.join(", ") || "Non défini"}</dd></div></dl><p>PrintPilot conservera le projet original et ne remplacera que les réglages que tu coches. Le fichier reste analysé localement.</p></section>}{orientationChoices.length > 0 && <section className="orientation-picker"><div><span>ORIENTATION DU MODÈLE</span><h3>Compare avant d’activer les supports</h3><p>Le score combine surplombs, hauteur et contact au plateau. La première proposition est la plus intéressante selon cette estimation géométrique.</p></div><div className="orientation-grid">{orientationChoices.map((choice, index) => <button key={choice.id} className={orientationId === choice.id ? "active" : ""} onClick={() => chooseOrientation(choice.id)}><span>{index === 0 ? "CONSEILLÉE" : "OPTION"}</span><b>{choice.label}</b><small>{fmt(choice.stats.overhangPercent, 1)}% surplomb · base {fmt(choice.stats.baseScore)}/100 · H {fmt(choice.stats.size[2], 1)} mm</small></button>)}</div></section>}{imported3mf && imported3mf.plateCount > 1 && <p className="orientation-lock">Projet multi-plateaux : orientation conservée pour ne pas casser sa structure. L’analyse des supports doit être vérifiée objet par objet dans Creality Print.</p>}<button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
       {step === 2 && <div className="step-panel">
         <Title step="02" title="À quoi servira la pièce ?" note="L’usage change davantage les réglages que la forme seule"/>
         <section className="preset-picker"><div><span>DÉMARRAGES RAPIDES</span><p>Un preset préremplit le questionnaire. Tu peux ensuite modifier chaque réponse ; les supports restent calculés depuis le STL.</p></div><div className="preset-grid">{PROJECT_PRESETS.map(preset => <button key={preset.id} className={appliedPreset === preset.id ? "active" : ""} onClick={() => applyProjectPreset(preset)}><b>{preset.title}</b><small>{preset.subtitle}</small></button>)}</div></section>
         <div className="usage-heading"><b>Choisis un usage principal</b><span>Puis ajoute jusqu’à 2 usages secondaires · {secondaryUses.length}/2 sélectionné(s)</span></div>
         <div className="choice-grid">{USES.map(u => { const primary = useCase === u.id, secondary = secondaryUses.includes(u.id), limitReached = secondaryUses.length >= 2 && !secondary; return <div key={u.id} className={`choice-card usage-card ${primary ? "selected" : ""} ${secondary ? "secondary-selected" : ""}`}><button className="usage-primary" onClick={() => choosePrimaryUse(u.id)}><span className="choice-radio"></span><b>{u.title}</b><small>{u.subtitle}</small></button><label><input type="checkbox" checked={secondary} disabled={primary || limitReached} onChange={() => toggleSecondaryUse(u.id)}/><span>{primary ? "Usage principal" : "Ajouter en secondaire"}</span></label></div>; })}</div>
         <div className="form-grid"><fieldset><legend><InfoLabel item="priority">Priorité</InfoLabel></legend><div className="segmented">{[["quality","Finition"],["balance","Équilibre"],["speed","Rapidité"],["strength","Solidité"]].map(([id,label]) => <button key={id} className={priority === id ? "active" : ""} onClick={() => setPriority(id)}>{label}</button>)}</div></fieldset><fieldset><legend><InfoLabel item="precision">Précision souhaitée</InfoLabel></legend><div className="segmented three">{[["fine","Fine"],["standard","Standard"],["rough","Large"]].map(([id,label]) => <button key={id} className={precision === id ? "active" : ""} onClick={() => setPrecision(id)}>{label}</button>)}</div></fieldset><label className="switch-row"><span><b><InfoLabel item="visibleTop">Face supérieure visible</InfoLabel></b><small>Peut justifier le lissage</small></span><input type="checkbox" checked={visibleTop} onChange={e => setVisibleTop(e.target.checked)}/><i></i></label><label className="select-row"><span><b><InfoLabel item="loadDirection">Effort mécanique</InfoLabel></b><small>Direction et intensité attendues</small></span><select value={loadDirection} onChange={e => setLoadDirection(e.target.value)}><option value="faible">Faible / décoratif</option><option value="xy">Principalement dans le plan XY</option><option value="z">Risque entre couches Z</option><option value="multi">Multidirectionnel</option></select></label></div>
-        <details className="advanced-criteria" open><summary>Critères avancés</summary><div className="criteria-grid">
+        <details className="advanced-criteria" open={experienceMode === "expert"}><summary>Critères avancés {experienceMode === "guided" ? "· facultatif" : "· mode expert"}</summary><div className="criteria-grid">
           <label><InfoLabel item="shapeClass">Forme globale</InfoLabel><select value={shapeClass} onChange={e => setShapeClass(e.target.value)}><option value="prismatic">Mécanique / prismatique</option><option value="organic">Organique / figurine</option><option value="tall">Fine et haute</option><option value="broad">Large dessous plat</option><option value="cavity">Cavité ou tunnel interne</option></select></label>
           <label><InfoLabel item="featureSize">Plus petit détail</InfoLabel><select value={featureSize} onChange={e => setFeatureSize(e.target.value)}><option value="normal">Supérieur à 1,2 mm</option><option value="fine">Entre 0,6 et 1,2 mm</option><option value="micro">Inférieur à 0,6 mm</option></select></label>
           <label><InfoLabel item="environment">Environnement</InfoLabel><select value={environment} onChange={e => setEnvironment(e.target.value)}><option value="inside">Intérieur sec</option><option value="outside">Extérieur / balcon</option><option value="humid">Pièce humide</option></select></label>
@@ -462,9 +574,11 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
           <div className="support-plan"><span>RÉGLAGES À REPORTER</span><dl><div><dt>Activer</dt><dd>{recommendation.supportPlan.enabled ? "Oui" : "Non"}</dd></div><div><dt>Type / style</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.type} · ${recommendation.supportPlan.style}` : "—"}</dd></div><div><dt>Angle de seuil</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.threshold}°` : "—"}</dd></div><div><dt>Sur plateau uniquement</dt><dd>{recommendation.supportPlan.enabled ? (recommendation.supportPlan.onPlateOnly ? "Oui" : "Non") : "—"}</dd></div><div><dt>Régions critiques seules</dt><dd>{recommendation.supportPlan.enabled ? (recommendation.supportPlan.criticalOnly ? "Oui" : "Non") : "—"}</dd></div><div><dt>Distance Z supérieure</dt><dd>{recommendation.supportPlan.enabled ? `${fmt(recommendation.supportPlan.topZ, 2)} mm` : "—"}</dd></div><div><dt>Distance support/objet XY</dt><dd>{recommendation.supportPlan.enabled ? `${fmt(recommendation.supportPlan.xy, 2)} mm` : "—"}</dd></div><div><dt>Interface supérieure</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.interfaceLayers} couches · ${fmt(recommendation.supportPlan.interfaceSpacing, 2)} mm` : "—"}</dd></div></dl></div>
           <div className="support-facts"><div><span>Contact plateau</span><b>{mesh ? `${fmt(mesh.baseScore)} / 100` : "—"}</b></div><div><span>Îlots</span><b>À valider au tranchage</b></div><div><span>Portée des ponts</span><b>Non mesurable sûrement depuis un STL seul</b></div></div><button className="secondary full" onClick={() => setTutorial("supports")}>Où régler les supports ?</button>
         </div></div>
-        <section className="scope-card"><div className="scope-head"><div><span>PROFIL OFFICIEL COMPLET</span><h3>Ce que PrintPilot modifiera</h3></div><b>{exportAudit.length} décisions</b></div><div className="scope-grid">{exportAudit.map(item => <div key={item.label}><span>{item.label}</span><b>{item.value}</b><small>{item.reason}</small></div>)}</div><details><summary>Réglages conservés du profil Creality Hi</summary><p><b>Tour de purge et CFS, purges, rétraction, ventilation, coutures, largeurs de ligne, plateau et ordre d’impression.</b> Le 3MF contient désormais toutes les valeurs du profil officiel choisi, puis applique uniquement les décisions listées au-dessus. Les calibrations de la fiche bobine ne sont pas encore injectées : le profil filament officiel reste utilisé.</p></details></section>
+        <section className="comparison-card"><div className="scope-head"><div><span>AVANT / APRÈS</span><h3>Choisis exactement ce que l’export modifie</h3></div><b>{selectedDecisions.length} / 7 appliqués</b></div><p>{imported3mf ? "Valeurs actuelles lues dans le 3MF. Décoche une ligne pour conserver sa valeur et sa configuration existantes." : "Le STL ne contient aucun réglage. Les lignes cochées surchargent le profil officiel Creality Hi ; les autres restent au profil officiel."}</p><div className="comparison-table"><div className="comparison-head"><span>Réglage</span><span>Actuel</span><span>Conseillé</span><span>Export</span></div>{comparisonRows.map(row => <label key={row.id} className={selectedDecisions.includes(row.id) ? "applied" : "preserved"}><b>{row.label}</b><span>{row.current}</span><strong>{row.recommended}</strong><span className="decision-toggle"><input type="checkbox" checked={selectedDecisions.includes(row.id)} onChange={() => toggleDecision(row.id)}/><i></i>{selectedDecisions.includes(row.id) ? "Appliquer" : "Conserver"}</span></label>)}</div>{experienceMode === "guided" && imported3mf && <small>Le mode Guidé masque les lignes déjà équivalentes. Passe en Expert pour tout voir.</small>}</section>
+        <section className="scope-card"><div className="scope-head"><div><span>PORTÉE DE L’EXPORT</span><h3>Ce que PrintPilot a décidé</h3></div><b>{selectedDecisions.length} décisions</b></div><div className="scope-grid">{exportAudit.map(item => <div key={item.label}><span>{item.label}</span><b>{item.value}</b><small>{item.reason}</small></div>)}</div><details><summary>Réglages volontairement laissés intacts</summary><p><b>Tour de purge et CFS, purges, rétraction, ventilation, coutures, largeurs de ligne, plateau et ordre d’impression.</b> PrintPilot ne désactive donc pas une tour de purge simplement parce qu’elle semble inutile : ces paramètres restent ceux du 3MF importé ou du profil officiel. Les calibrations de la fiche bobine ne sont pas injectées automatiquement.</p></details></section>
         <section className="estimate-card"><div><span>APRÈS TRANCHAGE DANS CREALITY PRINT</span><h3>Calculer le coût à partir des vraies valeurs</h3><p>Recopie la durée et la masse affichées après « Trancher le plateau ». Le STL seul ne permet pas une estimation fiable.</p></div><div className="slice-input-grid"><label><span>Heures</span><input inputMode="decimal" min="0" type="number" value={slicedHours} onChange={e => setSlicedHours(e.target.value)} placeholder="2"/></label><label><span>Minutes</span><input inputMode="decimal" min="0" max="59" type="number" value={slicedMinutes} onChange={e => setSlicedMinutes(e.target.value)} placeholder="35"/></label><label><span>Filament utilisé</span><div><input inputMode="decimal" min="0" type="number" value={slicedGrams} onChange={e => setSlicedGrams(e.target.value)} placeholder="84"/><em>g</em></div></label><label><span>Électricité</span><div><input inputMode="decimal" min="0" step="0.01" type="number" value={electricityPrice} onChange={e => setElectricityPrice(e.target.value)}/><em>€/kWh</em></div></label><label><span>Puissance moyenne</span><div><input inputMode="decimal" min="0" type="number" value={averagePower} onChange={e => setAveragePower(e.target.value)}/><em>W</em></div></label></div><div className="estimate-grid"><div><small>Matière</small><b>{slicedCost.materialCost == null ? "Prix/kg manquant" : `${fmt(slicedCost.materialCost, 2)} €`}</b></div><div><small>Électricité estimée</small><b>{slicedCost.energyCost == null ? "Durée manquante" : `${fmt(slicedCost.energyCost, 2)} €`}</b></div><div><small>Total direct</small><b>{slicedCost.totalCost == null ? "Données manquantes" : `${fmt(slicedCost.totalCost, 2)} €`}</b></div></div><p className="estimate-note">Matière = grammes tranchés × {filament.pricePerKg != null ? `${fmt(filament.pricePerKg, 2)} €/kg` : "prix/kg à renseigner dans la bobine"}. Électricité = durée × puissance moyenne × tarif. Le total n’inclut ni amortissement, ni maintenance, ni temps humain.</p></section>
-        <section className="export-card"><div><span>PROJET 3MF V5</span><h3>Exporter le STL avec les réglages appliqués</h3><p>Le modèle conserve son orientation. Le 3MF embarque le profil Creality Hi complet et déclare explicitement les seules valeurs que Creality Print doit conserver comme modifications.</p></div><button className="primary" onClick={exportProject} disabled={!mesh || nozzle !== "0.4"}>Exporter le projet 3MF</button>{exportStatus && <p className="export-status">{exportStatus}</p>}<small>Export ciblé : Creality Hi, buse 0,4 mm, mono-matériau. N’utilise plus les fichiers PrintPilot v3 ou v4. Après ouverture, les réglages listés plus haut doivent apparaître modifiés ; les autres doivent rester ceux du profil officiel. Vérifie ensuite l’aperçu couche par couche.</small></section>
+        <section className="print-memory-card"><div><span>APRÈS L’IMPRESSION</span><h3>Apprendre de tes vrais résultats</h3><p>{successfulWithFilament > 1 ? `${successfulWithFilament} impressions réussies sont déjà enregistrées. PrintPilot affiche cette mémoire sans remplacer automatiquement tes profils.` : "Enregistre le résultat réel pour construire une mémoire fiable. Une seule impression ne modifiera jamais automatiquement un profil."}</p></div><div className="outcome-row">{([['success','Réussie'],['mixed','À améliorer'],['failed','Échec']] as const).map(([id, label]) => <button key={id} className={outcome === id ? `active ${id}` : ""} onClick={() => setOutcome(id)}>{label}</button>)}</div><div className="rating-row"><span>Qualité</span>{[1,2,3,4,5].map(value => <button key={value} className={qualityRating >= value ? "active" : ""} onClick={() => setQualityRating(value)}>★</button>)}</div><div className="memory-fields"><label><span>Défauts observés</span><input value={defects} onChange={event => setDefects(event.target.value)} placeholder="Stringing, warping, support difficile…"/></label><label><span>Notes</span><input value={printNotes} onChange={event => setPrintNotes(event.target.value)} placeholder="Ce que tu referais différemment"/></label></div><button className="secondary" onClick={() => void savePrint()}>Enregistrer cette impression</button>{printStatus && <p className="form-message">{printStatus}</p>}</section>
+        <section className="export-card"><div><span>PROJET 3MF V6</span><h3>{imported3mf ? "Exporter le projet existant avec les choix appliqués" : "Exporter le STL avec les réglages appliqués"}</h3><p>{imported3mf && orientationId === "current" ? "La géométrie, les objets, les plateaux et tous les réglages non cochés du 3MF original sont conservés." : "Un nouveau projet Creality Hi est créé avec l’orientation affichée et uniquement les catégories cochées ci-dessus."}</p></div><button className="primary" onClick={exportProject} disabled={!mesh || nozzle !== "0.4"}>Exporter le projet 3MF</button>{exportStatus && <p className="export-status">{exportStatus}</p>}<small>Export ciblé : Creality Hi, buse 0,4 mm. Les modifications sont déclarées dans <code>different_settings_to_system</code> pour que Creality Print les reconnaisse. Vérifie ensuite le profil machine et l’aperçu couche par couche.</small></section>
         {recommendation.cautions.length > 0 && <div className="cautions">{recommendation.cautions.map(c => <p key={c}><b>À surveiller</b>{c}</p>)}</div>}
         <div className="reasoning"><b>Pourquoi cette configuration ?</b><p>{useCase === "functional" ? "La pièce est fonctionnelle : les parois portent l’essentiel de la résistance, avec un remplissage raisonnable." : "Le réglage suit ton usage et ta priorité."} {loadDirection === "z" ? "Le risque de rupture entre couches est signalé : réoriente la pièce avant d’augmenter simplement le remplissage." : "L’orientation reste le premier levier avant les supports et le remplissage."}</p></div>
       </div>}

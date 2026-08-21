@@ -1,4 +1,5 @@
 import { completeCrealityHiProcessProfile, normalizeCrealityHiLayer } from "./crealityHiProcessProfiles";
+import { unzipSync, zipSync } from "fflate";
 
 type Vec3 = [number, number, number];
 
@@ -95,24 +96,26 @@ function infillPattern(value: string) {
   return value === "Gyroïde" ? "gyroid" : "adaptivecubic";
 }
 
-type ConfigRecord = Record<string, string | string[]>;
+export type ExportDecision = "layer" | "walls" | "shells" | "infill" | "support" | "brim" | "ironing";
+export type Existing3mfSource = { archive: Uint8Array; projectSettings: Record<string, unknown> };
 
 /**
  * Only settings for which PrintPilot has made an explicit recommendation.
  * Everything else is inherited from the official Creality Hi process preset.
  */
-function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle: string): Record<string, string> {
+function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle: string, enabled?: ExportDecision[]): Record<string, string> {
+  const decisions = new Set<ExportDecision>(enabled ?? ["layer", "walls", "shells", "infill", "support", "brim", "ironing"]);
   const layer = nozzle === "0.6" ? 0.3 : layerNumber(settings.layer);
   const ironingEnabled = settings.ironing !== "Désactivé";
-  const overrides: Record<string, string> = {
-    layer_height: String(layer),
-    wall_loops: String(settings.walls),
-    sparse_infill_density: `${settings.infill}%`,
-    sparse_infill_pattern: infillPattern(settings.infillPattern),
-    enable_support: settings.support.enabled ? "1" : "0",
-  };
+  const overrides: Record<string, string> = {};
 
-  if (settings.support.enabled) {
+  if (decisions.has("layer")) overrides.layer_height = String(layer);
+  if (decisions.has("walls")) overrides.wall_loops = String(settings.walls);
+  if (decisions.has("shells")) Object.assign(overrides, { top_shell_layers: String(settings.topLayers), bottom_shell_layers: String(settings.bottomLayers) });
+  if (decisions.has("infill")) Object.assign(overrides, { sparse_infill_density: `${settings.infill}%`, sparse_infill_pattern: infillPattern(settings.infillPattern) });
+  if (decisions.has("support")) overrides.enable_support = settings.support.enabled ? "1" : "0";
+
+  if (decisions.has("support") && settings.support.enabled) {
     Object.assign(overrides, {
       support_type: supportType(settings.support.type),
       support_style: supportStyle(settings.support.style),
@@ -125,13 +128,13 @@ function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle:
       support_interface_spacing: String(settings.support.interfaceSpacing),
     });
   }
-  if (settings.brim.startsWith("Bordure")) {
-    overrides.brim_type = "outer_only";
-    overrides.brim_width = "5";
+  if (decisions.has("brim")) {
+    overrides.brim_type = settings.brim.startsWith("Bordure") ? "outer_only" : "auto_brim";
+    if (settings.brim.startsWith("Bordure")) overrides.brim_width = "5";
   }
-  if (ironingEnabled) {
-    Object.assign(overrides, {
-      ironing_type: "top",
+  if (decisions.has("ironing")) {
+    overrides.ironing_type = ironingEnabled ? "top" : "no ironing";
+    if (ironingEnabled) Object.assign(overrides, {
       ironing_pattern: "zig-zag",
       ironing_speed: "30",
       ironing_flow: "25%",
@@ -141,26 +144,31 @@ function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle:
   return overrides;
 }
 
-function projectConfig(settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string) {
+function projectConfig(settings: CrealityProjectSettings, filament: ExportFilament, nozzle: string, decisions?: ExportDecision[], source?: Existing3mfSource) {
   const officialProcess = processPreset(settings.layer, nozzle);
   const officialFilament = filamentPreset(filament.family, nozzle);
-  const overrides = conservativeProcessOverrides(settings, nozzle);
-  const config: ConfigRecord = {
-    ...completeCrealityHiProcessProfile(settings.layer),
+  const overrides = conservativeProcessOverrides(settings, nozzle, decisions);
+  const base = source ? { ...source.projectSettings } : completeCrealityHiProcessProfile(settings.layer);
+  const previousDifferences = Array.isArray(base.different_settings_to_system) ? base.different_settings_to_system.map(String) : ["", "", ""];
+  while (previousDifferences.length < 3) previousDifferences.push("");
+  const declared = new Set(previousDifferences[0].split(";").filter(Boolean));
+  Object.keys(overrides).forEach(key => declared.add(key));
+  const config: Record<string, unknown> = {
+    ...base,
     version: "7.2.1",
     name: "project_settings",
     from: "project",
-    printer_settings_id: `Creality Hi ${nozzle} nozzle`,
-    print_settings_id: officialProcess,
-    filament_settings_id: [officialFilament],
+    printer_settings_id: source ? base.printer_settings_id ?? `Creality Hi ${nozzle} nozzle` : `Creality Hi ${nozzle} nozzle`,
+    print_settings_id: source ? base.print_settings_id ?? officialProcess : officialProcess,
+    filament_settings_id: source ? base.filament_settings_id ?? [officialFilament] : [officialFilament],
     ...overrides,
     // Creality Print intentionally restores every value from the named system
     // preset unless the project explicitly lists which keys are different.
     // Entry 0 is the process profile, entry 1 the sole filament and entry 2
     // the printer profile.
-    different_settings_to_system: [Object.keys(overrides).join(";"), "", ""],
+    different_settings_to_system: [Array.from(declared).join(";"), ...previousDifferences.slice(1)],
   };
-  return JSON.stringify(config, null, 4);
+  return { config, overrides };
 }
 
 function modelXml(name: string, triangles: ExportTriangle[]) {
@@ -303,9 +311,37 @@ export function buildCrealityProject(params: {
   nozzle: string;
   settings: CrealityProjectSettings;
   filament: ExportFilament;
+  decisions?: ExportDecision[];
+  source3mf?: Existing3mfSource;
 }) {
   const name = safeName(params.modelName);
-  const overrides = conservativeProcessOverrides(params.settings, params.nozzle);
+  const { config, overrides } = projectConfig(params.settings, params.filament, params.nozzle, params.decisions, params.source3mf);
+  const manifest = encoder.encode(JSON.stringify({
+    generator: "PrintPilot Hi",
+    exportVersion: 6,
+    policy: params.source3mf ? "preserve-original-3mf-plus-selected-overrides" : "full-official-profile-plus-selected-overrides",
+    generatedAt: new Date().toISOString(),
+    orientation: params.source3mf ? "Orientation et structure du 3MF original conservées" : "Coordonnées du STL conservées ; Z minimum posé sur le plateau",
+    filament: params.filament.label,
+    officialBaseProfile: processPreset(params.settings.layer, params.nozzle),
+    officialBaseLayer: normalizeCrealityHiLayer(params.settings.layer),
+    officialFilamentProfile: filamentPreset(params.filament.family, params.nozzle),
+    appliedProcessOverrides: overrides,
+    declaredProcessDifferences: Object.keys(overrides),
+    preservedOriginalProject: Boolean(params.source3mf),
+    unchangedOfficialSections: ["prime_tower", "purge", "retraction", "cooling", "seam", "line_widths", "bed_type", "print_sequence"],
+    filamentCalibrationExported: false,
+    settings: params.settings,
+  }, null, 2));
+
+  if (params.source3mf) {
+    const entries = unzipSync(params.source3mf.archive);
+    entries["Metadata/project_settings.config"] = encoder.encode(JSON.stringify(config, null, 4));
+    entries["Metadata/printpilot.json"] = manifest;
+    const bytes = zipSync(entries, { level: 6 });
+    return { blob: new Blob([bytes.buffer as ArrayBuffer], { type: "model/3mf" }), filename: `${name}_PrintPilot_v6_projet_conserve_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
+  }
+
   const files: ZipEntry[] = [
     {
       name: "[Content_Types].xml",
@@ -317,26 +353,11 @@ export function buildCrealityProject(params: {
     },
     { name: "3D/3dmodel.model", data: encoder.encode(modelXml(name, params.triangles)) },
     { name: "Metadata/model_settings.config", data: encoder.encode(modelConfig(name)) },
-    { name: "Metadata/project_settings.config", data: encoder.encode(projectConfig(params.settings, params.filament, params.nozzle)) },
+    { name: "Metadata/project_settings.config", data: encoder.encode(JSON.stringify(config, null, 4)) },
     {
       name: "Metadata/printpilot.json",
-      data: encoder.encode(JSON.stringify({
-        generator: "PrintPilot Hi",
-        exportVersion: 5,
-        policy: "full-official-profile-plus-explicit-overrides",
-        generatedAt: new Date().toISOString(),
-        orientation: "Coordonnées du STL conservées ; Z minimum posé sur le plateau",
-        filament: params.filament.label,
-        officialBaseProfile: processPreset(params.settings.layer, params.nozzle),
-        officialBaseLayer: normalizeCrealityHiLayer(params.settings.layer),
-        officialFilamentProfile: filamentPreset(params.filament.family, params.nozzle),
-        appliedProcessOverrides: overrides,
-        declaredProcessDifferences: Object.keys(overrides),
-        unchangedOfficialSections: ["prime_tower", "purge", "retraction", "cooling", "seam", "line_widths", "bed_type", "print_sequence"],
-        filamentCalibrationExported: false,
-        settings: params.settings,
-      }, null, 2)),
+      data: manifest,
     },
   ];
-  return { blob: zip(files), filename: `${name}_PrintPilot_v5_reglages_appliques_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
+  return { blob: zip(files), filename: `${name}_PrintPilot_v6_reglages_selectionnes_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
 }

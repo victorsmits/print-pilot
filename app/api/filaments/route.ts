@@ -68,6 +68,8 @@ export async function POST(request: Request) {
     const [row] = await db.insert(filaments).values({
       userEmail: user.email, brand, productLine, material, colorName,
       colorHex: String(data.colorHex ?? "").trim() || null, spoolWeightG: numberOrNull(data.spoolWeightG), remainingG: numberOrNull(data.remainingG), pricePerKg: numberOrNull(data.pricePerKg), lotNumber: String(data.lotNumber ?? "").trim() || null,
+      supplier: String(data.supplier ?? "").trim() || null, purchaseDate: String(data.purchaseDate ?? "").trim() || null, invoiceNumber: String(data.invoiceNumber ?? "").trim() || null,
+      purchaseTotal: numberOrNull(data.purchaseTotal), purchaseQuantity: numberOrNull(data.purchaseQuantity), cfsSlot: String(data.cfsSlot ?? "").trim() || null, nozzleDiameter: numberOrNull(data.nozzleDiameter), lastDriedAt: String(data.lastDriedAt ?? "").trim() || null,
       openedAt: String(data.openedAt ?? "").trim() || null, storageLocation: String(data.storageLocation ?? "").trim() || null, storageHumidity: numberOrNull(data.storageHumidity), profileName: String(data.profileName ?? "").trim() || null,
       nozzleTempMin: numberOrNull(data.nozzleTempMin), nozzleTempMax: numberOrNull(data.nozzleTempMax), bedTempMin: numberOrNull(data.bedTempMin), bedTempMax: numberOrNull(data.bedTempMax), maxVolumetricSpeed: numberOrNull(data.maxVolumetricSpeed),
       flowRatio: numberOrNull(data.flowRatio), pressureAdvance: numberOrNull(data.pressureAdvance), dryingTemp: numberOrNull(data.dryingTemp), dryingHours: numberOrNull(data.dryingHours),
@@ -85,10 +87,10 @@ export async function PATCH(request: Request) {
     const user = await requireUser();
     const data = await request.json() as Record<string, unknown>; const id = Number(data.id);
     if (!Number.isInteger(id)) return Response.json({ error: "Identifiant invalide." }, { status: 400 });
-    const editable = ["brand","productLine","material","colorName","colorHex","lotNumber","openedAt","storageLocation","profileName","notes"] as const;
+    const editable = ["brand","productLine","material","colorName","colorHex","lotNumber","openedAt","storageLocation","profileName","notes","supplier","purchaseDate","invoiceNumber","cfsSlot","lastDriedAt"] as const;
     const update: Record<string, unknown> = { updatedAt: new Date().toISOString() };
     editable.forEach(key => { if (key in data) update[key] = String(data[key] ?? "").trim() || null; });
-    const numeric = ["spoolWeightG","remainingG","pricePerKg","storageHumidity","nozzleTempMin","nozzleTempMax","bedTempMin","bedTempMax","maxVolumetricSpeed","flowRatio","pressureAdvance","dryingTemp","dryingHours"] as const;
+    const numeric = ["spoolWeightG","remainingG","pricePerKg","storageHumidity","nozzleTempMin","nozzleTempMax","bedTempMin","bedTempMax","maxVolumetricSpeed","flowRatio","pressureAdvance","dryingTemp","dryingHours","purchaseTotal","purchaseQuantity","nozzleDiameter"] as const;
     numeric.forEach(key => { if (key in data) update[key] = numberOrNull(data[key]); });
     (["cfsCompatible","abrasive","calibrated"] as const).forEach(key => { if (key in data) update[key] = bool(data[key], false); });
     const db = await getDb();
