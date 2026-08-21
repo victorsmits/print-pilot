@@ -38,6 +38,14 @@ export type CrealityProjectSettings = {
   acceleration: number;
   brim: string;
   ironing: string;
+  texture: {
+    action: "preserve" | "disable" | "global" | "localized";
+    label: string;
+    fuzzySkin: "none" | "external";
+    thickness: number | null;
+    pointDistance: number | null;
+    firstLayer: boolean;
+  };
   support: {
     enabled: boolean;
     type: string;
@@ -51,8 +59,6 @@ export type CrealityProjectSettings = {
     interfaceSpacing: number;
   };
 };
-
-type ZipEntry = { name: string; data: Uint8Array };
 
 const encoder = new TextEncoder();
 
@@ -96,8 +102,14 @@ function infillPattern(value: string) {
   return value === "Gyroïde" ? "gyroid" : "adaptivecubic";
 }
 
-export type ExportDecision = "layer" | "walls" | "shells" | "infill" | "support" | "brim" | "ironing";
+export type ExportDecision = "layer" | "walls" | "shells" | "infill" | "support" | "brim" | "ironing" | "texture";
 export type Existing3mfSource = { archive: Uint8Array; projectSettings: Record<string, unknown> };
+
+export type ProjectVerification = {
+  passed: boolean;
+  applied: Array<{ key: string; expected: string; actual: string | null; declared: boolean }>;
+  errors: string[];
+};
 
 /**
  * Only settings for which PrintPilot has made an explicit recommendation.
@@ -139,6 +151,17 @@ function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle:
       ironing_speed: "30",
       ironing_flow: "25%",
       ironing_spacing: "0.15",
+    });
+  }
+  if (decisions.has("texture") && settings.texture.action === "disable") {
+    overrides.fuzzy_skin = "none";
+  }
+  if (decisions.has("texture") && settings.texture.action === "global" && settings.texture.thickness != null && settings.texture.pointDistance != null) {
+    Object.assign(overrides, {
+      fuzzy_skin: settings.texture.fuzzySkin,
+      fuzzy_skin_thickness: String(settings.texture.thickness),
+      fuzzy_skin_point_distance: String(settings.texture.pointDistance),
+      fuzzy_skin_first_layer: settings.texture.firstLayer ? "1" : "0",
     });
   }
   return overrides;
@@ -245,64 +268,26 @@ function modelConfig(name: string) {
 </config>`;
 }
 
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+export function verifyCrealityProjectArchive(bytes: Uint8Array, expected: Record<string, string>): ProjectVerification {
+  const errors: string[] = [];
+  let config: Record<string, unknown> = {};
+  try {
+    const entries = unzipSync(bytes);
+    const raw = entries["Metadata/project_settings.config"];
+    if (!raw) throw new Error("Metadata/project_settings.config absent");
+    config = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : "Archive 3MF illisible");
   }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function write16(view: DataView, offset: number, value: number) { view.setUint16(offset, value, true); }
-function write32(view: DataView, offset: number, value: number) { view.setUint32(offset, value, true); }
-
-function zip(entries: ZipEntry[]) {
-  const localParts: Uint8Array[] = [];
-  const centralParts: Uint8Array[] = [];
-  let offset = 0;
-  for (const entry of entries) {
-    const name = encoder.encode(entry.name);
-    const checksum = crc32(entry.data);
-    const local = new Uint8Array(30 + name.length + entry.data.length);
-    const localView = new DataView(local.buffer);
-    write32(localView, 0, 0x04034b50);
-    write16(localView, 4, 20);
-    write16(localView, 6, 0x0800);
-    write16(localView, 8, 0);
-    write32(localView, 14, checksum);
-    write32(localView, 18, entry.data.length);
-    write32(localView, 22, entry.data.length);
-    write16(localView, 26, name.length);
-    local.set(name, 30);
-    local.set(entry.data, 30 + name.length);
-    localParts.push(local);
-
-    const central = new Uint8Array(46 + name.length);
-    const centralView = new DataView(central.buffer);
-    write32(centralView, 0, 0x02014b50);
-    write16(centralView, 4, 20);
-    write16(centralView, 6, 20);
-    write16(centralView, 8, 0x0800);
-    write16(centralView, 10, 0);
-    write32(centralView, 16, checksum);
-    write32(centralView, 20, entry.data.length);
-    write32(centralView, 24, entry.data.length);
-    write16(centralView, 28, name.length);
-    write32(centralView, 42, offset);
-    central.set(name, 46);
-    centralParts.push(central);
-    offset += local.length;
-  }
-  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
-  const end = new Uint8Array(22);
-  const endView = new DataView(end.buffer);
-  write32(endView, 0, 0x06054b50);
-  write16(endView, 8, entries.length);
-  write16(endView, 10, entries.length);
-  write32(endView, 12, centralSize);
-  write32(endView, 16, offset);
-  return new Blob([...localParts, ...centralParts, end].map(part => part.buffer as ArrayBuffer), { type: "model/3mf" });
+  const differences = Array.isArray(config.different_settings_to_system) ? String(config.different_settings_to_system[0] ?? "").split(";") : [];
+  const applied = Object.entries(expected).map(([key, value]) => {
+    const actual = config[key] == null ? null : String(config[key]);
+    const declared = differences.includes(key);
+    if (actual !== value) errors.push(`${key}: attendu ${value}, trouvé ${actual ?? "absent"}`);
+    if (!declared) errors.push(`${key}: surcharge non déclarée`);
+    return { key, expected: value, actual, declared };
+  });
+  return { passed: errors.length === 0, applied, errors };
 }
 
 export function buildCrealityProject(params: {
@@ -318,7 +303,7 @@ export function buildCrealityProject(params: {
   const { config, overrides } = projectConfig(params.settings, params.filament, params.nozzle, params.decisions, params.source3mf);
   const manifest = encoder.encode(JSON.stringify({
     generator: "PrintPilot Hi",
-    exportVersion: 6,
+    exportVersion: 7,
     policy: params.source3mf ? "preserve-original-3mf-plus-selected-overrides" : "full-official-profile-plus-selected-overrides",
     generatedAt: new Date().toISOString(),
     orientation: params.source3mf ? "Orientation et structure du 3MF original conservées" : "Coordonnées du STL conservées ; Z minimum posé sur le plateau",
@@ -339,25 +324,21 @@ export function buildCrealityProject(params: {
     entries["Metadata/project_settings.config"] = encoder.encode(JSON.stringify(config, null, 4));
     entries["Metadata/printpilot.json"] = manifest;
     const bytes = zipSync(entries, { level: 6 });
-    return { blob: new Blob([bytes.buffer as ArrayBuffer], { type: "model/3mf" }), filename: `${name}_PrintPilot_v6_projet_conserve_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
+    const verification = verifyCrealityProjectArchive(bytes, overrides);
+    if (!verification.passed) throw new Error(`Le contrôle interne du 3MF a échoué : ${verification.errors.join(" · ")}`);
+    return { blob: new Blob([bytes.buffer as ArrayBuffer], { type: "model/3mf" }), filename: `${name}_PrintPilot_v7_projet_conserve_CrealityHi.3mf`, appliedKeys: Object.keys(overrides), verification };
   }
 
-  const files: ZipEntry[] = [
-    {
-      name: "[Content_Types].xml",
-      data: encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n</Types>`),
-    },
-    {
-      name: "_rels/.rels",
-      data: encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`),
-    },
-    { name: "3D/3dmodel.model", data: encoder.encode(modelXml(name, params.triangles)) },
-    { name: "Metadata/model_settings.config", data: encoder.encode(modelConfig(name)) },
-    { name: "Metadata/project_settings.config", data: encoder.encode(JSON.stringify(config, null, 4)) },
-    {
-      name: "Metadata/printpilot.json",
-      data: manifest,
-    },
-  ];
-  return { blob: zip(files), filename: `${name}_PrintPilot_v6_reglages_selectionnes_CrealityHi.3mf`, appliedKeys: Object.keys(overrides) };
+  const entries: Record<string, Uint8Array> = {
+    "[Content_Types].xml": encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n</Types>`),
+    "_rels/.rels": encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`),
+    "3D/3dmodel.model": encoder.encode(modelXml(name, params.triangles)),
+    "Metadata/model_settings.config": encoder.encode(modelConfig(name)),
+    "Metadata/project_settings.config": encoder.encode(JSON.stringify(config, null, 4)),
+    "Metadata/printpilot.json": manifest,
+  };
+  const bytes = zipSync(entries, { level: 6 });
+  const verification = verifyCrealityProjectArchive(bytes, overrides);
+  if (!verification.passed) throw new Error(`Le contrôle interne du 3MF a échoué : ${verification.errors.join(" · ")}`);
+  return { blob: new Blob([bytes.buffer as ArrayBuffer], { type: "model/3mf" }), filename: `${name}_PrintPilot_v7_reglages_selectionnes_CrealityHi.3mf`, appliedKeys: Object.keys(overrides), verification };
 }
