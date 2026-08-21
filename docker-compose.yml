@@ -3,7 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: printpilot-hi:latest
     container_name: printpilot-hi
     init: true
     restart: unless-stopped
