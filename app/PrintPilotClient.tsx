@@ -191,9 +191,11 @@ function parseSTL(buffer: ArrayBuffer): Triangle[] {
 }
 
 function geometryForAxis(triangles: Triangle[], axis: 0 | 1 | 2, sign: 1 | -1) {
-  const all = triangles.flatMap(t => [t.a, t.b, t.c]);
   const mins: Vec3 = [Infinity, Infinity, Infinity], maxs: Vec3 = [-Infinity, -Infinity, -Infinity];
-  all.forEach(v => v.forEach((n, i) => { mins[i] = Math.min(mins[i], n); maxs[i] = Math.max(maxs[i], n); }));
+  triangles.forEach(item => [item.a, item.b, item.c].forEach(vertex => vertex.forEach((value, index) => {
+    mins[index] = Math.min(mins[index], value);
+    maxs[index] = Math.max(maxs[index], value);
+  })));
   const bed = sign === 1 ? mins[axis] : maxs[axis];
   const tolerance = Math.max(0.08, (maxs[axis] - mins[axis]) * 0.002);
   const totalArea = triangles.reduce((s, t) => s + t.area, 0) || 1;
@@ -216,9 +218,11 @@ export function analyseMesh(name: string, triangles: Triangle[]): MeshStats {
   if (!triangles.length) throw new Error("Le fichier ne contient aucun triangle exploitable.");
   const rawSignedVolume = triangles.reduce((s, t) => s + dot(t.a, cross(t.b, t.c)) / 6, 0);
   const orientedTriangles = rawSignedVolume < 0 ? triangles.map(t => triangle(t.a, t.c, t.b)) : triangles;
-  const points = orientedTriangles.flatMap(t => [t.a, t.b, t.c]);
   const mins: Vec3 = [Infinity, Infinity, Infinity], maxs: Vec3 = [-Infinity, -Infinity, -Infinity];
-  points.forEach(v => v.forEach((n, i) => { mins[i] = Math.min(mins[i], n); maxs[i] = Math.max(maxs[i], n); }));
+  orientedTriangles.forEach(item => [item.a, item.b, item.c].forEach(vertex => vertex.forEach((value, index) => {
+    mins[index] = Math.min(mins[index], value);
+    maxs[index] = Math.max(maxs[index], value);
+  })));
   const size: Vec3 = [maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]];
   const signedVolume = orientedTriangles.reduce((s, t) => s + dot(t.a, cross(t.b, t.c)) / 6, 0);
   const surfaceAreaMm2 = orientedTriangles.reduce((sum, t) => sum + t.area, 0);
@@ -244,6 +248,12 @@ function rotateTriangles(triangles: Triangle[], orientationId: string) {
   return triangles.map(item => triangle(orientation.rotate(item.a), orientation.rotate(item.b), orientation.rotate(item.c)));
 }
 
+export function minimumTriangleZ(triangles: Triangle[]) {
+  let minZ = Infinity;
+  triangles.forEach(item => { minZ = Math.min(minZ, item.a[2], item.b[2], item.c[2]); });
+  return minZ;
+}
+
 function fmt(n: number, digits = 0) { return Number.isFinite(n) ? n.toFixed(digits).replace(".", ",") : "—"; }
 
 function ModelCanvas({ stats }: { stats: MeshStats | null }) {
@@ -259,7 +269,7 @@ function ModelCanvas({ stats }: { stats: MeshStats | null }) {
     for (let x = 0; x < box.width + box.height; x += grid) { ctx.beginPath(); ctx.moveTo(x, box.height * .72); ctx.lineTo(x - box.height, box.height); ctx.stroke(); }
     if (!stats) { ctx.fillStyle = "rgba(211,226,216,.38)"; ctx.font = "600 13px ui-monospace"; ctx.textAlign = "center"; ctx.fillText("APERÇU DU MODÈLE", box.width / 2, box.height / 2 - 5); ctx.font = "12px system-ui"; ctx.fillStyle = "rgba(211,226,216,.22)"; ctx.fillText("Importe un STL pour commencer", box.width / 2, box.height / 2 + 18); return; }
     const tris = stats.triangles.length > 10000 ? stats.triangles.filter((_, i) => i % Math.ceil(stats.triangles.length / 10000) === 0) : stats.triangles;
-    const minZ = Math.min(...stats.triangles.flatMap(t => [t.a[2], t.b[2], t.c[2]]));
+    const minZ = minimumTriangleZ(stats.triangles);
     const bedTolerance = Math.max(0.08, stats.size[2] * 0.002);
     const [cx, cy, cz] = stats.size.map(v => v / 2) as Vec3;
     const scale = Math.min(box.width * .64 / Math.max(stats.size[0], stats.size[1], 1), box.height * .60 / Math.max(stats.size[2], stats.size[1], 1));
@@ -443,8 +453,10 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
   }, [slicedHours, slicedMinutes, slicedGrams, electricityPrice, averagePower, filament.pricePerKg]);
   const orientationChoices = useMemo(() => {
     if (!sourceTriangles.length || (imported3mf?.plateCount ?? 1) > 1) return [];
+    const step = Math.max(1, Math.ceil(sourceTriangles.length / 50000));
+    const analysisTriangles = step === 1 ? sourceTriangles : sourceTriangles.filter((_, index) => index % step === 0);
     return ORIENTATIONS.map(item => {
-      const stats = analyseMesh(mesh?.name ?? "modèle", rotateTriangles(sourceTriangles, item.id));
+      const stats = analyseMesh(mesh?.name ?? "modèle", rotateTriangles(analysisTriangles, item.id));
       const score = stats.overhangPercent + stats.size[2] / 100 - stats.baseScore * 0.12;
       return { ...item, stats, score };
     }).sort((a, b) => a.score - b.score);
@@ -490,9 +502,8 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     setExportStatus(`3MF v6 créé : ${project.appliedKeys.length} clés appliquées. ${imported3mf && orientationId === "current" ? "La structure, les plateaux et les réglages non cochés du 3MF original sont conservés." : "Un nouveau projet Creality Hi a été construit avec l’orientation choisie."}`);
   }
   function chooseOrientation(id: string) {
-    const choice = orientationChoices.find(item => item.id === id);
-    if (!choice) return;
-    setOrientationId(id); setMesh(choice.stats);
+    if (!sourceTriangles.length) return;
+    setOrientationId(id); setMesh(analyseMesh(mesh?.name ?? "modèle", rotateTriangles(sourceTriangles, id)));
   }
   function toggleDecision(id: ExportDecision) {
     setSelectedDecisions(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { analyseMesh } from "../app/PrintPilotClient";
+import { analyseMesh, minimumTriangleZ } from "../app/PrintPilotClient";
 
 type Vec3 = [number, number, number];
 const v = (x: number, y: number, z: number): Vec3 => [x, y, z];
@@ -25,4 +25,6 @@ const cube = [
 const result = analyseMesh("cube.stl", cube);
 assert.equal(result.overhangAreaMm2, 0, "la face en contact avec le plateau ne doit pas compter comme support");
 assert.equal(result.overhangPercent, 0, "un cube posé à plat ne doit pas demander de support");
+const veryLargePreview = Array.from({ length: 120000 }, (_, index) => tri(v(0, 0, index % 7), v(1, 0, index % 7), v(0, 1, index % 7)));
+assert.equal(minimumTriangleZ(veryLargePreview), 0, "l’aperçu doit accepter un grand nombre de triangles sans dépasser la pile JavaScript");
 process.stdout.write("Support analysis: cube posé à plat = 0 % de support\n");
