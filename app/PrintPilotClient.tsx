@@ -279,55 +279,88 @@ const DEFAULT_CAMERA_ROTATION: [number, number] = [-0.55, 0.75];
 
 function ModelCanvas({ stats, compact = false }: { stats: MeshStats | null; compact?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const [rotation, setRotation] = useState<[number, number]>(DEFAULT_CAMERA_ROTATION);
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState<[number, number]>([0, 0]);
+  const camera = useRef<{ rotation: [number, number]; zoom: number; pan: [number, number] }>({ rotation: DEFAULT_CAMERA_ROTATION, zoom: 1, pan: [0, 0] });
+  const interacting = useRef(false);
+  const frame = useRef<number | null>(null);
+  const scheduleDraw = useRef<() => void>(() => undefined);
   const drag = useRef<{ x: number; y: number; rx: number; ry: number; px: number; py: number; mode: "rotate" | "pan" } | null>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ distance: number; x: number; y: number; zoom: number; px: number; py: number } | null>(null);
   const clampZoom = (value: number) => Math.min(6, Math.max(0.35, value));
-  const resetCamera = () => { setRotation(DEFAULT_CAMERA_ROTATION); setZoom(1); setPan([0, 0]); };
-  const setCameraView = (next: [number, number]) => { setRotation(next); setZoom(1); setPan([0, 0]); };
+  const resetCamera = () => { camera.current = { rotation: DEFAULT_CAMERA_ROTATION, zoom: 1, pan: [0, 0] }; scheduleDraw.current(); };
+  const setCameraView = (next: [number, number]) => { camera.current = { rotation: next, zoom: 1, pan: [0, 0] }; scheduleDraw.current(); };
+  const renderData = useMemo(() => {
+    if (!stats) return null;
+    const mins: Vec3 = [Infinity, Infinity, Infinity], maxs: Vec3 = [-Infinity, -Infinity, -Infinity];
+    stats.triangles.forEach(item => [item.a, item.b, item.c].forEach(vertex => vertex.forEach((value, index) => {
+      mins[index] = Math.min(mins[index], value); maxs[index] = Math.max(maxs[index], value);
+    })));
+    const minZ = mins[2], bedTolerance = Math.max(0.08, stats.size[2] * 0.002);
+    const annotate = (limit: number) => {
+      const stride = Math.max(1, Math.ceil(stats.triangles.length / limit));
+      const result: { t: Triangle; danger: boolean }[] = [];
+      for (let index = 0; index < stats.triangles.length; index += stride) {
+        const t = stats.triangles[index];
+        const onBed = [t.a[2], t.b[2], t.c[2]].every(value => Math.abs(value - minZ) <= bedTolerance);
+        result.push({ t, danger: !onBed && t.normal[2] < -Math.cos(30 * Math.PI / 180) });
+      }
+      return result;
+    };
+    return {
+      center: mins.map((value, index) => (value + maxs[index]) / 2) as Vec3,
+      diameter: Math.max(1, Math.hypot(stats.size[0], stats.size[1], stats.size[2])),
+      detailed: annotate(compact ? 1800 : 4000),
+      interactive: annotate(compact ? 450 : 800),
+    };
+  }, [stats, compact]);
   useEffect(() => {
     const canvas = ref.current, ctx = canvas?.getContext("2d"); if (!canvas || !ctx) return;
     const draw = () => {
-      const ratio = window.devicePixelRatio || 1, box = canvas.getBoundingClientRect();
-      canvas.width = Math.max(1, Math.round(box.width * ratio)); canvas.height = Math.max(1, Math.round(box.height * ratio));
+      const ratio = Math.min(window.devicePixelRatio || 1, 1.5), box = canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.round(box.width * ratio)), height = Math.max(1, Math.round(box.height * ratio));
+      if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, box.width, box.height);
       const grid = 22; ctx.strokeStyle = "rgba(108,132,119,.16)"; ctx.lineWidth = 1;
       for (let x = -box.height; x < box.width + box.height; x += grid) { ctx.beginPath(); ctx.moveTo(x, box.height * .72); ctx.lineTo(x + box.height, box.height); ctx.stroke(); }
       for (let x = 0; x < box.width + box.height; x += grid) { ctx.beginPath(); ctx.moveTo(x, box.height * .72); ctx.lineTo(x - box.height, box.height); ctx.stroke(); }
-      if (!stats) { ctx.fillStyle = "rgba(211,226,216,.38)"; ctx.font = "600 13px ui-monospace"; ctx.textAlign = "center"; ctx.fillText("APERÇU DU MODÈLE", box.width / 2, box.height / 2 - 5); ctx.font = "12px system-ui"; ctx.fillStyle = "rgba(211,226,216,.22)"; ctx.fillText("Importe un STL pour commencer", box.width / 2, box.height / 2 + 18); return; }
-      const tris = stats.triangles.length > 10000 ? stats.triangles.filter((_, i) => i % Math.ceil(stats.triangles.length / 10000) === 0) : stats.triangles;
-      const mins: Vec3 = [Infinity, Infinity, Infinity], maxs: Vec3 = [-Infinity, -Infinity, -Infinity];
-      stats.triangles.forEach(item => [item.a, item.b, item.c].forEach(vertex => vertex.forEach((value, index) => { mins[index] = Math.min(mins[index], value); maxs[index] = Math.max(maxs[index], value); })));
-      const minZ = mins[2], bedTolerance = Math.max(0.08, stats.size[2] * 0.002);
-      const center = mins.map((value, index) => (value + maxs[index]) / 2) as Vec3;
-      const diameter = Math.max(1, Math.hypot(stats.size[0], stats.size[1], stats.size[2]));
-      const scale = Math.min(box.width, box.height) * .76 / diameter * zoom;
-      const project = (v: Vec3) => { let x = v[0] - center[0], y = v[1] - center[1], z = v[2] - center[2]; const ca = Math.cos(rotation[1]), sa = Math.sin(rotation[1]); [x, z] = [x * ca + z * sa, -x * sa + z * ca]; const cb = Math.cos(rotation[0]), sb = Math.sin(rotation[0]); [y, z] = [y * cb - z * sb, y * sb + z * cb]; return [box.width / 2 + pan[0] + x * scale, box.height / 2 + pan[1] - y * scale, z] as const; };
-      tris.map(t => ({ t, z: (project(t.a)[2] + project(t.b)[2] + project(t.c)[2]) / 3 })).sort((a, b) => a.z - b.z).forEach(({ t }) => { const [a, b, c] = [project(t.a), project(t.b), project(t.c)]; const onBed = [t.a[2], t.b[2], t.c[2]].every(value => Math.abs(value - minZ) <= bedTolerance); const danger = !onBed && t.normal[2] < -Math.cos(30 * Math.PI / 180); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.closePath(); ctx.fillStyle = danger ? "rgba(239,156,78,.34)" : "rgba(75,230,149,.34)"; ctx.fill(); ctx.strokeStyle = danger ? "rgba(239,156,78,.20)" : "rgba(129,240,180,.16)"; ctx.lineWidth = .55; ctx.stroke(); });
+      if (!stats || !renderData) { ctx.fillStyle = "rgba(211,226,216,.38)"; ctx.font = "600 13px ui-monospace"; ctx.textAlign = "center"; ctx.fillText("APERÇU DU MODÈLE", box.width / 2, box.height / 2 - 5); ctx.font = "12px system-ui"; ctx.fillStyle = "rgba(211,226,216,.22)"; ctx.fillText("Importe un STL pour commencer", box.width / 2, box.height / 2 + 18); return; }
+      const { rotation, zoom, pan } = camera.current;
+      const scale = Math.min(box.width, box.height) * .76 / renderData.diameter * zoom;
+      const ca = Math.cos(rotation[1]), sa = Math.sin(rotation[1]), cb = Math.cos(rotation[0]), sb = Math.sin(rotation[0]);
+      const project = (v: Vec3) => { let x = v[0] - renderData.center[0], y = v[1] - renderData.center[1], z = v[2] - renderData.center[2]; [x, z] = [x * ca + z * sa, -x * sa + z * ca]; [y, z] = [y * cb - z * sb, y * sb + z * cb]; return [box.width / 2 + pan[0] + x * scale, box.height / 2 + pan[1] - y * scale, z] as const; };
+      const moving = interacting.current;
+      const projected = (moving ? renderData.interactive : renderData.detailed).map(({ t, danger }) => {
+        const a = project(t.a), b = project(t.b), c = project(t.c);
+        return { a, b, c, danger, z: (a[2] + b[2] + c[2]) / 3 };
+      });
+      if (!moving) projected.sort((a, b) => a.z - b.z);
+      projected.forEach(({ a, b, c, danger }) => { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.closePath(); ctx.fillStyle = danger ? "rgba(239,156,78,.40)" : "rgba(75,230,149,.40)"; ctx.fill(); if (!moving) { ctx.strokeStyle = danger ? "rgba(239,156,78,.18)" : "rgba(129,240,180,.13)"; ctx.lineWidth = .5; ctx.stroke(); } });
     };
-    draw();
-    const observer = new ResizeObserver(draw); observer.observe(canvas);
-    return () => observer.disconnect();
-  }, [stats, rotation, zoom, pan]);
+    scheduleDraw.current = () => { if (frame.current !== null) return; frame.current = window.requestAnimationFrame(() => { frame.current = null; draw(); }); };
+    camera.current = { rotation: DEFAULT_CAMERA_ROTATION, zoom: 1, pan: [0, 0] };
+    scheduleDraw.current();
+    const observer = new ResizeObserver(scheduleDraw.current); observer.observe(canvas);
+    return () => { observer.disconnect(); if (frame.current !== null) window.cancelAnimationFrame(frame.current); frame.current = null; };
+  }, [stats, renderData]);
   const down = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    interacting.current = true;
+    const { rotation, zoom, pan } = camera.current;
     if (pointers.current.size === 1) drag.current = { x: e.clientX, y: e.clientY, rx: rotation[0], ry: rotation[1], px: pan[0], py: pan[1], mode: e.shiftKey || e.button === 1 || e.button === 2 ? "pan" : "rotate" };
     if (pointers.current.size === 2) { const [a, b] = [...pointers.current.values()]; gesture.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, zoom, px: pan[0], py: pan[1] }; drag.current = null; }
   };
   const move = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     if (!pointers.current.has(e.pointerId)) return; pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pointers.current.size === 2 && gesture.current) { const [a, b] = [...pointers.current.values()], distance = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), x = (a.x + b.x) / 2, y = (a.y + b.y) / 2; setZoom(clampZoom(gesture.current.zoom * distance / Math.max(1, gesture.current.distance))); setPan([gesture.current.px + x - gesture.current.x, gesture.current.py + y - gesture.current.y]); return; }
+    if (pointers.current.size === 2 && gesture.current) { const [a, b] = [...pointers.current.values()], distance = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), x = (a.x + b.x) / 2, y = (a.y + b.y) / 2; camera.current.zoom = clampZoom(gesture.current.zoom * distance / Math.max(1, gesture.current.distance)); camera.current.pan = [gesture.current.px + x - gesture.current.x, gesture.current.py + y - gesture.current.y]; scheduleDraw.current(); return; }
     if (!drag.current) return;
-    if (drag.current.mode === "pan") setPan([drag.current.px + e.clientX - drag.current.x, drag.current.py + e.clientY - drag.current.y]);
-    else setRotation([Math.max(-Math.PI / 2, Math.min(Math.PI / 2, drag.current.rx + (e.clientY - drag.current.y) * .008)), drag.current.ry + (e.clientX - drag.current.x) * .008]);
+    if (drag.current.mode === "pan") camera.current.pan = [drag.current.px + e.clientX - drag.current.x, drag.current.py + e.clientY - drag.current.y];
+    else camera.current.rotation = [Math.max(-Math.PI / 2, Math.min(Math.PI / 2, drag.current.rx + (e.clientY - drag.current.y) * .008)), drag.current.ry + (e.clientX - drag.current.x) * .008];
+    scheduleDraw.current();
   };
-  const up = (e: ReactPointerEvent<HTMLCanvasElement>) => { pointers.current.delete(e.pointerId); if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); drag.current = null; gesture.current = null; };
+  const up = (e: ReactPointerEvent<HTMLCanvasElement>) => { pointers.current.delete(e.pointerId); if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); drag.current = null; gesture.current = null; interacting.current = pointers.current.size > 0; scheduleDraw.current(); };
   return <div className={`model-viewer ${compact ? "compact" : ""}`}>
-    <canvas ref={ref} className="model-canvas" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onWheel={event => { event.preventDefault(); setZoom(value => clampZoom(value * Math.exp(-event.deltaY * .0012))); }} onDoubleClick={resetCamera} onContextMenu={event => event.preventDefault()} aria-label="Aperçu manipulable du modèle 3D" />
-    {stats && <><div className="viewer-toolbar viewer-views"><button onClick={() => setCameraView(DEFAULT_CAMERA_ROTATION)}>ISO</button><button onClick={() => setCameraView([0, 0])}>DESSUS</button><button onClick={() => setCameraView([-Math.PI / 2, 0])}>FACE</button><button onClick={() => setCameraView([-Math.PI / 2, Math.PI / 2])}>CÔTÉ</button></div><div className="viewer-toolbar viewer-zoom"><button onClick={() => setZoom(value => clampZoom(value / 1.25))} aria-label="Dézoomer">−</button><button onClick={resetCamera} aria-label="Recentrer le modèle">⌂</button><button onClick={() => setZoom(value => clampZoom(value * 1.25))} aria-label="Zoomer">+</button></div>{!compact && <span className="viewer-help">Glisser : tourner · Maj + glisser : déplacer · Molette/pincer : zoomer · Double-clic : recentrer</span>}</>}
+    <canvas ref={ref} className="model-canvas" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onWheel={event => { event.preventDefault(); camera.current.zoom = clampZoom(camera.current.zoom * Math.exp(-event.deltaY * .0012)); scheduleDraw.current(); }} onDoubleClick={resetCamera} onContextMenu={event => event.preventDefault()} aria-label="Aperçu manipulable du modèle 3D" />
+    {stats && <><div className="viewer-toolbar viewer-views"><button onClick={() => setCameraView(DEFAULT_CAMERA_ROTATION)}>ISO</button><button onClick={() => setCameraView([0, 0])}>DESSUS</button><button onClick={() => setCameraView([-Math.PI / 2, 0])}>FACE</button><button onClick={() => setCameraView([-Math.PI / 2, Math.PI / 2])}>CÔTÉ</button></div><div className="viewer-toolbar viewer-zoom"><button onClick={() => { camera.current.zoom = clampZoom(camera.current.zoom / 1.25); scheduleDraw.current(); }} aria-label="Dézoomer">−</button><button onClick={resetCamera} aria-label="Recentrer le modèle">⌂</button><button onClick={() => { camera.current.zoom = clampZoom(camera.current.zoom * 1.25); scheduleDraw.current(); }} aria-label="Zoomer">+</button></div>{!compact && <span className="viewer-help">Glisser : tourner · Maj + glisser : déplacer · Molette/pincer : zoomer · Double-clic : recentrer</span>}</>}
   </div>;
 }
 
