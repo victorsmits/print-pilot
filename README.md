@@ -25,9 +25,39 @@ L’application est ensuite disponible sur `http://localhost:3000`. Pour utilise
 
 ### Identité et sécurité
 
-Le mode Docker est prévu par défaut pour un seul utilisateur. `SELF_HOSTED_USER_EMAIL` sert d’identifiant de propriété pour les données et doit rester stable. Il ne constitue pas un mécanisme de connexion.
+L’application utilise Google OpenID Connect. Chaque inventaire et historique est isolé par l’adresse e-mail du compte connecté.
 
-Si l’application est exposée hors de votre réseau privé, placez-la derrière votre authentification habituelle ou un VPN. Ne publiez pas directement le port 3000 sur Internet.
+1. Dans Google Cloud Console, créez un client OAuth de type **Application Web**.
+2. Ajoutez l’URI de redirection exacte : `http://localhost:3000/auth/google/callback`.
+3. Copiez l’identifiant et le secret du client dans `.env`.
+4. Générez un secret de session avec `openssl rand -base64 48`.
+
+Exemple :
+
+```dotenv
+PRINTPILOT_PORT=3000
+PUBLIC_APP_URL=http://localhost:3000
+GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+SESSION_SECRET=une-valeur-aleatoire-d-au-moins-32-caracteres
+AUTH_DISABLED=false
+```
+
+`PUBLIC_APP_URL` et l’URI enregistrée chez Google doivent correspondre exactement, port compris. Pour un domaine public, utilisez HTTPS et remplacez l’URI par `https://votre-domaine/auth/google/callback`.
+
+Pour un dépannage local temporaire uniquement, `AUTH_DISABLED=true` réactive le compte local défini par `SELF_HOSTED_USER_EMAIL`. Ne l’utilisez pas sur une instance accessible depuis Internet.
+
+#### Reprendre les données du compte local
+
+Les anciennes données restent associées à `owner@printpilot.local`. Après une première connexion Google, remplacez `votre@gmail.com` par l’adresse réellement utilisée puis exécutez une seule fois :
+
+```sh
+docker compose exec printpilot /app/node_modules/.bin/wrangler d1 execute DB \
+  --config /app/wrangler.selfhost.jsonc --local --persist-to /data \
+  --command "UPDATE filaments SET user_email='votre@gmail.com' WHERE user_email='owner@printpilot.local'; UPDATE print_projects SET user_email='votre@gmail.com' WHERE user_email='owner@printpilot.local'; UPDATE calibrations SET user_email='votre@gmail.com' WHERE user_email='owner@printpilot.local'; UPDATE print_runs SET user_email='votre@gmail.com' WHERE user_email='owner@printpilot.local';"
+```
+
+Faites d’abord une sauvegarde du volume. Cette commande change uniquement le propriétaire logique des lignes ; elle ne supprime ni les bobines ni l’historique.
 
 ### Sauvegarde
 
@@ -44,95 +74,22 @@ Le nom réel du volume peut varier avec le nom du dossier ou le nom de projet Co
 
 Le projet reste compatible avec son environnement Vinext/Cloudflare d’origine. Les commandes de développement sont décrites plus bas.
 
-## Architecture d’origine
+## Architecture
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Application Next/Vinext exécutée par Wrangler, avec base D1 locale, authentification Google OIDC et stockage persistant dans le volume Docker.
 
 ## Prerequisites
 
 - Node.js `>=22.13.0`
 - Linux with `flock`, `curl`, and GNU `timeout`
 
-## Sites Lifecycle
+## Développement
 
-The Sites lifecycle CLI runs the locked dependency install before returning this checkout. Edit the source under `app/`, then checkpoint when a coherent milestone is ready to inspect or share. The remote Sites builder runs `npm run build` against the pushed commit. Do not repeat install or build as a normal pre-checkpoint step.
-
-This starter does not use `wrangler.jsonc`.
-
-`install:ci` is intentionally a single, non-retrying `npm ci`. It refuses a concurrent install for the same project, consumes a matching image-seeded npm cache with `--prefer-offline` while retaining registry fallback for a missing cache object, otherwise downloads and verifies the complete vinext tarball recorded in `package-lock.json`, limits npm to one socket, and terminates a stalled install. `build` applies a short timeout. These helpers target Linux and use GNU `timeout`; they are not native macOS scripts.
-
-Scripts that need writable project-scoped home, npm, XDG, and temporary paths use `scripts/sites-env.sh`. The `dev` and `start` scripts honor the caller's runtime environment and keep Wrangler logs inside the checkout. The generated `.sites-runtime/` directory is disposable and ignored by Git.
-
-## Included Shape
-
-- edit site code under `app/`
-- `app/chatgpt-auth.ts` provides optional dispatch-owned ChatGPT sign-in helpers
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+- le code applicatif se trouve dans `app/` ;
+- `app/auth.ts` signe et vérifie les sessions Google ;
+- `db/` contient le schéma Drizzle ;
+- `drizzle/` contient les migrations appliquées au démarrage ;
+- `tests/` vérifie l’analyse des supports et les exports 3MF.
 
 ## Diagnostic Commands
 

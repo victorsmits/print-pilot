@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { filaments } from "../../../db/schema";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getAuthenticatedUser } from "../../auth";
 
 const INITIAL_FILAMENTS = [
   ["Bambu Lab", "PLA Basic", "PLA", "Noir", "#171918"],
@@ -32,7 +32,7 @@ function errorMessage(error: unknown) {
 }
 
 async function requireUser() {
-  const user = await getChatGPTUser();
+  const user = await getAuthenticatedUser();
   if (!user) throw new Error("AUTH_REQUIRED");
   return user;
 }

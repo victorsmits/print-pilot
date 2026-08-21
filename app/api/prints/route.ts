@@ -1,7 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { printRuns } from "../../../db/schema";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getAuthenticatedUser } from "../../auth";
 
 function numberOrNull(value: unknown): number | null {
   if (value === "" || value === null || value === undefined) return null;
@@ -10,7 +10,7 @@ function numberOrNull(value: unknown): number | null {
 }
 
 async function requireUser() {
-  const user = await getChatGPTUser();
+  const user = await getAuthenticatedUser();
   if (!user) throw new Error("AUTH_REQUIRED");
   return user;
 }

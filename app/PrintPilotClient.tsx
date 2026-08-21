@@ -1,6 +1,8 @@
 "use client";
 
-import { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import AccountPanel from "./AccountPanel";
 import InventoryPanel from "./InventoryPanel";
 import PrintHistoryPanel, { type PrintRun } from "./PrintHistoryPanel";
@@ -275,29 +277,124 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
-function ModelCanvas({ stats }: { stats: MeshStats | null }) {
+function ModelCanvas({ stats, compact = false }: { stats: MeshStats | null; compact?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const [rotation, setRotation] = useState<[number, number]>([-0.55, 0.75]);
-  const drag = useRef<{ x: number; y: number; rx: number; ry: number } | null>(null);
+  const viewer = useRef({
+    reset: () => undefined,
+    setView: () => undefined as void,
+    zoom: () => undefined as void,
+    fitPlate: () => undefined,
+  } as { reset: () => void; setView: (view: "iso" | "top" | "front" | "side") => void; zoom: (factor: number) => void; fitPlate: () => void });
   useEffect(() => {
-    const canvas = ref.current, ctx = canvas?.getContext("2d"); if (!canvas || !ctx) return;
-    const ratio = window.devicePixelRatio || 1, box = canvas.getBoundingClientRect();
-    canvas.width = box.width * ratio; canvas.height = box.height * ratio; ctx.scale(ratio, ratio); ctx.clearRect(0, 0, box.width, box.height);
-    const grid = 22; ctx.strokeStyle = "rgba(108,132,119,.16)"; ctx.lineWidth = 1;
-    for (let x = -box.height; x < box.width + box.height; x += grid) { ctx.beginPath(); ctx.moveTo(x, box.height * .72); ctx.lineTo(x + box.height, box.height); ctx.stroke(); }
-    for (let x = 0; x < box.width + box.height; x += grid) { ctx.beginPath(); ctx.moveTo(x, box.height * .72); ctx.lineTo(x - box.height, box.height); ctx.stroke(); }
-    if (!stats) { ctx.fillStyle = "rgba(211,226,216,.38)"; ctx.font = "600 13px ui-monospace"; ctx.textAlign = "center"; ctx.fillText("APERÇU DU MODÈLE", box.width / 2, box.height / 2 - 5); ctx.font = "12px system-ui"; ctx.fillStyle = "rgba(211,226,216,.22)"; ctx.fillText("Importe un STL pour commencer", box.width / 2, box.height / 2 + 18); return; }
-    const tris = stats.triangles.length > 10000 ? stats.triangles.filter((_, i) => i % Math.ceil(stats.triangles.length / 10000) === 0) : stats.triangles;
-    const minZ = minimumTriangleZ(stats.triangles);
+    const canvas = ref.current; if (!canvas || !stats) return;
+    canvas.parentElement?.classList.remove("webgl-failed");
+    let renderer: THREE.WebGLRenderer;
+    try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: "high-performance" }); }
+    catch { canvas.parentElement?.classList.add("webgl-failed"); return; }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+    renderer.setClearColor(0x18201b, 1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+
+    const scene = new THREE.Scene();
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(stats.triangles.length * 9);
+    const normals = new Float32Array(stats.triangles.length * 9);
+    const colors = new Float32Array(stats.triangles.length * 9);
+    let minZ = Infinity;
+    stats.triangles.forEach((item, index) => {
+      minZ = Math.min(minZ, item.a[2], item.b[2], item.c[2]);
+      const offset = index * 9, vertices = [item.a, item.b, item.c];
+      vertices.forEach((vertex, vertexIndex) => {
+        positions.set(vertex, offset + vertexIndex * 3);
+        normals.set(item.normal, offset + vertexIndex * 3);
+      });
+    });
     const bedTolerance = Math.max(0.08, stats.size[2] * 0.002);
-    const [cx, cy, cz] = stats.size.map(v => v / 2) as Vec3;
-    const scale = Math.min(box.width * .64 / Math.max(stats.size[0], stats.size[1], 1), box.height * .60 / Math.max(stats.size[2], stats.size[1], 1));
-    const project = (v: Vec3) => { let x = v[0] - cx, y = v[1] - cy, z = v[2] - cz; const ca = Math.cos(rotation[1]), sa = Math.sin(rotation[1]); [x, z] = [x * ca + z * sa, -x * sa + z * ca]; const cb = Math.cos(rotation[0]), sb = Math.sin(rotation[0]); [y, z] = [y * cb - z * sb, y * sb + z * cb]; return [box.width / 2 + x * scale, box.height * .48 - y * scale, z] as const; };
-    tris.map(t => ({ t, z: (project(t.a)[2] + project(t.b)[2] + project(t.c)[2]) / 3 })).sort((a, b) => a.z - b.z).forEach(({ t }) => { const [a, b, c] = [project(t.a), project(t.b), project(t.c)]; const onBed = [t.a[2], t.b[2], t.c[2]].every(value => Math.abs(value - minZ) <= bedTolerance); const danger = !onBed && t.normal[2] < -Math.cos(30 * Math.PI / 180); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.closePath(); ctx.fillStyle = danger ? "rgba(239,156,78,.30)" : "rgba(75,230,149,.30)"; ctx.fill(); ctx.strokeStyle = danger ? "rgba(239,156,78,.16)" : "rgba(129,240,180,.13)"; ctx.lineWidth = .55; ctx.stroke(); });
-  }, [stats, rotation]);
-  const down = (e: ReactPointerEvent<HTMLCanvasElement>) => { drag.current = { x: e.clientX, y: e.clientY, rx: rotation[0], ry: rotation[1] }; e.currentTarget.setPointerCapture(e.pointerId); };
-  const move = (e: ReactPointerEvent<HTMLCanvasElement>) => { if (drag.current) setRotation([drag.current.rx + (e.clientY - drag.current.y) * .008, drag.current.ry + (e.clientX - drag.current.x) * .008]); };
-  return <canvas ref={ref} className="model-canvas" onPointerDown={down} onPointerMove={move} onPointerUp={() => { drag.current = null; }} aria-label="Aperçu rotatif du modèle 3D" />;
+    stats.triangles.forEach((item, index) => {
+      const onBed = [item.a[2], item.b[2], item.c[2]].every(value => Math.abs(value - minZ) <= bedTolerance);
+      const danger = !onBed && item.normal[2] < -Math.cos(30 * Math.PI / 180);
+      const color = danger ? new THREE.Color(0xef7f32) : new THREE.Color(0x35d77d);
+      const offset = index * 9;
+      for (let vertex = 0; vertex < 3; vertex += 1) colors.set(color.toArray(), offset + vertex * 3);
+    });
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geometry.computeBoundingBox(); geometry.computeBoundingSphere();
+    const bounds = geometry.boundingBox!, center = bounds.getCenter(new THREE.Vector3());
+    const radius = Math.max(1, geometry.boundingSphere?.radius ?? 1);
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide, shininess: 28, specular: 0x4a6d59, flatShading: true }));
+    scene.add(mesh);
+
+    const bedCenter = new THREE.Vector3(center.x, center.y, minZ - 0.12);
+    const bedGeometry = new THREE.PlaneGeometry(260, 260);
+    const bed = new THREE.Mesh(bedGeometry, new THREE.MeshBasicMaterial({ color: 0x101713, side: THREE.DoubleSide, depthWrite: true }));
+    bed.position.copy(bedCenter); scene.add(bed);
+    const grid = new THREE.GridHelper(260, 26, 0x6f8375, 0x334039);
+    grid.rotation.x = Math.PI / 2; grid.position.set(bedCenter.x, bedCenter.y, minZ - 0.05);
+    const gridMaterial = grid.material as THREE.LineBasicMaterial; gridMaterial.transparent = true; gridMaterial.opacity = 0.82;
+    scene.add(grid);
+    const border = new THREE.LineSegments(new THREE.EdgesGeometry(bedGeometry), new THREE.LineBasicMaterial({ color: 0x91a79a }));
+    border.position.set(bedCenter.x, bedCenter.y, minZ - 0.03); scene.add(border);
+    const axisGeometry = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(bedCenter.x - 130, bedCenter.y, minZ), new THREE.Vector3(bedCenter.x + 130, bedCenter.y, minZ),
+      new THREE.Vector3(bedCenter.x, bedCenter.y - 130, minZ), new THREE.Vector3(bedCenter.x, bedCenter.y + 130, minZ),
+    ]);
+    const axes = new THREE.LineSegments(axisGeometry, new THREE.LineBasicMaterial({ color: 0xa7b8ad, transparent: true, opacity: 0.72 })); scene.add(axes);
+
+    scene.add(new THREE.HemisphereLight(0xe4fff0, 0x101713, 2.4));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 3.2); keyLight.position.set(center.x + radius * 2, center.y - radius * 2, center.z + radius * 4); scene.add(keyLight);
+    const fillLight = new THREE.DirectionalLight(0x76dca1, 1.25); fillLight.position.set(center.x - radius * 3, center.y + radius, center.z + radius); scene.add(fillLight);
+
+    const viewHeight = Math.max(12, radius * 2.55);
+    const camera = new THREE.OrthographicCamera(-viewHeight, viewHeight, viewHeight, -viewHeight, 0.1, Math.max(3000, radius * 20));
+    camera.up.set(0, 0, 1);
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = false; controls.screenSpacePanning = true; controls.minZoom = 0.08; controls.maxZoom = 20;
+    const render = () => renderer.render(scene, camera);
+    controls.addEventListener("change", render);
+    const distance = Math.max(100, radius * 6);
+    const applyView = (view: "iso" | "top" | "front" | "side", resetZoom = true) => {
+      camera.up.set(0, 0, 1);
+      if (view === "top") { camera.position.set(center.x, center.y, center.z + distance); camera.up.set(0, 1, 0); }
+      else if (view === "front") camera.position.set(center.x, center.y - distance, center.z);
+      else if (view === "side") camera.position.set(center.x + distance, center.y, center.z);
+      else camera.position.set(center.x + distance * .72, center.y - distance * .72, center.z + distance * .58);
+      controls.target.copy(center); if (resetZoom) camera.zoom = 1; camera.lookAt(center); camera.updateProjectionMatrix(); controls.update(); render();
+    };
+    const resize = () => {
+      const box = canvas.getBoundingClientRect(), width = Math.max(1, box.width), height = Math.max(1, box.height), aspect = width / height;
+      renderer.setSize(width, height, false);
+      camera.left = -viewHeight * aspect / 2; camera.right = viewHeight * aspect / 2; camera.top = viewHeight / 2; camera.bottom = -viewHeight / 2;
+      camera.updateProjectionMatrix(); render();
+    };
+    viewer.current = {
+      reset: () => applyView("iso"),
+      setView: view => applyView(view),
+      zoom: factor => { camera.zoom = Math.min(20, Math.max(0.08, camera.zoom * factor)); camera.updateProjectionMatrix(); render(); },
+      fitPlate: () => { applyView("top", false); camera.zoom = Math.min(1, viewHeight / 286); camera.updateProjectionMatrix(); render(); },
+    };
+    applyView("iso");
+    const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
+    return () => {
+      observer.disconnect(); controls.removeEventListener("change", render); controls.dispose();
+      scene.traverse(object => {
+        const disposable = object as THREE.Mesh | THREE.LineSegments;
+        disposable.geometry?.dispose();
+        const material = disposable.material;
+        if (Array.isArray(material)) material.forEach(item => item.dispose()); else material?.dispose();
+      });
+      renderer.dispose();
+      viewer.current = { reset: () => undefined, setView: () => undefined, zoom: () => undefined, fitPlate: () => undefined };
+    };
+  }, [stats]);
+  return <div className={`model-viewer ${compact ? "compact" : ""}`}>
+    <canvas ref={ref} className="model-canvas" onDoubleClick={() => viewer.current.reset()} onContextMenu={event => event.preventDefault()} aria-label="Aperçu WebGL manipulable du modèle 3D" />
+    {!stats && <div className="viewer-empty"><b>APERÇU DU MODÈLE</b><span>Importe un STL pour commencer</span></div>}
+    {stats && <><div className="viewer-empty viewer-error"><b>VIEWER INDISPONIBLE</b><span>WebGL n’est pas disponible dans ce navigateur.</span></div><div className="bed-label">PLATEAU HI · 260 × 260 MM</div><div className="viewer-toolbar viewer-views"><button onClick={() => viewer.current.setView("iso")}>ISO</button><button onClick={() => viewer.current.setView("top")}>DESSUS</button><button onClick={() => viewer.current.setView("front")}>FACE</button><button onClick={() => viewer.current.setView("side")}>CÔTÉ</button></div><div className="viewer-toolbar viewer-zoom"><button onClick={() => viewer.current.zoom(1 / 1.25)} aria-label="Dézoomer">−</button><button onClick={() => viewer.current.reset()} aria-label="Recentrer le modèle">⌂</button><button onClick={() => viewer.current.fitPlate()} aria-label="Afficher tout le plateau">▦</button><button onClick={() => viewer.current.zoom(1.25)} aria-label="Zoomer">+</button></div>{!compact && <span className="viewer-help">Glisser : tourner · Clic droit : déplacer · Molette/pincer : zoomer · ▦ : plateau entier</span>}</>}
+  </div>;
 }
 
 function TutorialPanel({ item, onClose }: { item: HelpKey | null; onClose: () => void }) {
@@ -323,7 +420,7 @@ function InfoLabel({ children, item }: { children: string; item: CriteriaHelpKey
 
 export type AccountUser = { displayName: string; email: string } | null;
 
-export default function PrintPilotClient({ user }: { user: AccountUser }) {
+export default function PrintPilotClient({ user, authError = null }: { user: AccountUser; authError?: string | null }) {
   const [mesh, setMesh] = useState<MeshStats | null>(null), [fileState, setFileState] = useState<"idle" | "loading" | "error">("idle"), [error, setError] = useState(""), [step, setStep] = useState(1);
   const [useCase, setUseCase] = useState("functional"), [secondaryUses, setSecondaryUses] = useState<string[]>([]), [priority, setPriority] = useState("balance"), [precision, setPrecision] = useState("standard"), [visibleTop, setVisibleTop] = useState(true), [loadDirection, setLoadDirection] = useState("faible");
   const [environment, setEnvironment] = useState("inside"), [fitType, setFitType] = useState("none"), [supportAccess, setSupportAccess] = useState("easy"), [exposure, setExposure] = useState("normal");
@@ -694,11 +791,12 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
     {historyOpen && <PrintHistoryPanel prints={prints} loading={historyLoading} onClose={() => setHistoryOpen(false)} />}
     {accountOpen && <AccountPanel user={user} inventoryCount={inventory.length} onClose={() => setAccountOpen(false)} />}
     <header className="topbar"><a className="brand" href="#top"><span className="brand-mark">P</span><span>PRINTPILOT <b>HI</b></span></a><div className="machine-strip"><span className="status-dot"></span><label>Imprimante<select value={printer} onChange={e => setPrinter(e.target.value)}><option value="hi">Creality Hi</option><option value="k2">Creality K2 / autre</option></select></label><label>Buse<select value={nozzle} onChange={e => setNozzle(e.target.value)}><option value="0.4">0,4 mm</option><option value="0.6">0,6 mm</option></select></label><span className="machine-spec">260 × 260 × 300</span></div><div className="top-actions"><div className="experience-switch" aria-label="Niveau d’explication"><button className={experienceMode === "guided" ? "active" : ""} onClick={() => changeExperienceMode("guided")}>Guidé</button><button className={experienceMode === "expert" ? "active" : ""} onClick={() => changeExperienceMode("expert")}>Expert</button></div><button className="ghost" onClick={() => { setHistoryOpen(true); void reloadPrints(); }}>Historique <b>{prints.length}</b></button><button className="ghost" onClick={() => setInventoryOpen(true)}>Inventaire <b>{inventory.length}</b></button><button className="account-button" onClick={() => setAccountOpen(true)}><span>{(user?.displayName ?? "V").charAt(0).toUpperCase()}</span><i>{user?.displayName ?? "Compte"}</i></button></div></header>
+    {authError && <div className="auth-warning"><b>Connexion Google impossible.</b> {authError === "invalid_oauth_response" ? "La réponse OAuth a expiré ou ne correspond pas à cette session. Recommence la connexion." : "Google n’a pas pu confirmer la connexion. Vérifie l’URI de redirection et les identifiants OAuth."}</div>}
     {printer !== "hi" && <div className="printer-warning"><b>Attention : mauvais profil machine.</b> Après l’ouverture d’un 3MF, Creality Print peut sélectionner une K2. Remets « Creality Hi » pour retrouver les bons profils.</div>}
     <section className="hero" id="top"><div className="hero-copy"><span className="eyebrow">ASSISTANT PERSONNEL · CREALITY HI</span><h1>Le bon profil.<br/><em>Les bons supports.</em><br/>Avant d’imprimer.</h1><p>Importe une pièce, combine géométrie, usage et bobine réelle, puis obtiens une configuration expliquée — avec le chemin exact dans Creality Print.</p></div><div className="hero-metric"><span>Moteur de décision basé sur</span><b>GÉOMÉTRIE</b><b>USAGE</b><b>INVENTAIRE</b></div></section>
     <nav className="steps">{["Modèle", "Usage", "Filament", "Configuration"].map((label, i) => <button key={label} className={step === i + 1 ? "active" : step > i + 1 ? "done" : ""} onClick={() => setStep(i + 1)}><span>{step > i + 1 ? "✓" : String(i + 1).padStart(2, "0")}</span>{label}</button>)}</nav>
     <section className="workspace"><div className="stage">
-      {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : géométrie et orientation<br/>3MF : géométrie, plateaux et réglages existants</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>Glisser pour tourner</span></div><p className="orientation-assumption">Orientation analysée : position réelle du fichier, point Z le plus bas posé sur le plateau pour un STL.</p></div></div>{imported3mf && <section className="import-summary"><div><span>PROJET 3MF LU</span><b>{imported3mf.objectCount} objet(s) · {imported3mf.plateCount} plateau(x)</b></div><dl><div><dt>Application</dt><dd>{imported3mf.sourceApplication ?? "Inconnue"}</dd></div><div><dt>Imprimante</dt><dd>{imported3mf.printerProfile ?? "Non définie"}</dd></div><div><dt>Processus</dt><dd>{imported3mf.processProfile ?? "Non défini"}</dd></div><div><dt>Filament(s)</dt><dd>{imported3mf.filamentProfiles.join(", ") || "Non défini"}</dd></div></dl><p>PrintPilot conservera le projet original et ne remplacera que les réglages que tu coches. Le fichier reste analysé localement.</p></section>}{orientationChoices.length > 0 && <section className="orientation-picker"><div><span>ORIENTATION DU MODÈLE</span><h3>Compare avant d’activer les supports</h3><p>Le score combine surplombs, hauteur et contact au plateau. La première proposition est la plus intéressante selon cette estimation géométrique.</p></div><div className="orientation-grid">{orientationChoices.map((choice, index) => <button key={choice.id} className={orientationId === choice.id ? "active" : ""} onClick={() => chooseOrientation(choice.id)}><span>{index === 0 ? "CONSEILLÉE" : "OPTION"}</span><b>{choice.label}</b><small>{fmt(choice.stats.overhangPercent, 1)}% surplomb · base {fmt(choice.stats.baseScore)}/100 · H {fmt(choice.stats.size[2], 1)} mm</small></button>)}</div></section>}{imported3mf && imported3mf.plateCount > 1 && <p className="orientation-lock">Projet multi-plateaux : orientation conservée pour ne pas casser sa structure. L’analyse des supports doit être vérifiée objet par objet dans Creality Print.</p>}<button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
+      {step === 1 && <div className="step-panel"><Title step="01" title="Charge ton modèle" note="Analyse locale · le fichier ne quitte pas ton appareil"/><div className="upload-grid"><div className="dropzone" onDragOver={e => e.preventDefault()} onDrop={drop} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".stl,.3mf" onChange={choose} hidden/><span className="upload-icon">↥</span><h3>{fileState === "loading" ? "Analyse en cours…" : "Dépose un STL ou un 3MF"}</h3><p>STL : géométrie et orientation<br/>3MF : géométrie, plateaux et réglages existants</p><button className="primary">Choisir un fichier</button>{error && <div className="error-line">{error}</div>}</div><div className="analysis-preview"><ModelCanvas stats={mesh}/><div className="preview-key"><span><i className="green"></i>surface imprimable</span><span><i className="orange"></i>surplomb probable</span><span>La caméra ne change pas l’impression</span></div><p className="orientation-assumption">Orientation analysée : position réelle du fichier, point Z le plus bas posé sur le plateau pour un STL. Pour tourner réellement la pièce à l’export, sélectionne une orientation sous l’aperçu.</p></div></div>{imported3mf && <section className="import-summary"><div><span>PROJET 3MF LU</span><b>{imported3mf.objectCount} objet(s) · {imported3mf.plateCount} plateau(x)</b></div><dl><div><dt>Application</dt><dd>{imported3mf.sourceApplication ?? "Inconnue"}</dd></div><div><dt>Imprimante</dt><dd>{imported3mf.printerProfile ?? "Non définie"}</dd></div><div><dt>Processus</dt><dd>{imported3mf.processProfile ?? "Non défini"}</dd></div><div><dt>Filament(s)</dt><dd>{imported3mf.filamentProfiles.join(", ") || "Non défini"}</dd></div></dl><p>PrintPilot conservera le projet original et ne remplacera que les réglages que tu coches. Le fichier reste analysé localement.</p></section>}{orientationChoices.length > 0 && <section className="orientation-picker"><div><span>ORIENTATION DU MODÈLE</span><h3>Compare avant d’activer les supports</h3><p>Le score combine surplombs, hauteur et contact au plateau. La première proposition est la plus intéressante selon cette estimation géométrique.</p></div><div className="orientation-grid">{orientationChoices.map((choice, index) => <button key={choice.id} className={orientationId === choice.id ? "active" : ""} onClick={() => chooseOrientation(choice.id)}><span>{index === 0 ? "CONSEILLÉE" : "OPTION"}</span><b>{choice.label}</b><small>{fmt(choice.stats.overhangPercent, 1)}% surplomb · base {fmt(choice.stats.baseScore)}/100 · H {fmt(choice.stats.size[2], 1)} mm</small></button>)}</div></section>}{imported3mf && imported3mf.plateCount > 1 && <p className="orientation-lock">Projet multi-plateaux : orientation conservée pour ne pas casser sa structure. L’analyse des supports doit être vérifiée objet par objet dans Creality Print.</p>}<button className="text-action" onClick={() => setStep(2)}>Continuer sans modèle →</button></div>}
       {step === 2 && <div className="step-panel">
         <Title step="02" title="À quoi servira la pièce ?" note="L’usage change davantage les réglages que la forme seule"/>
         <section className="preset-picker"><div><span>DÉMARRAGES RAPIDES</span><p>Un preset préremplit le questionnaire. Tu peux ensuite modifier chaque réponse ; les supports restent calculés depuis le STL.</p></div><div className="preset-grid">{PROJECT_PRESETS.map(preset => <button key={preset.id} className={appliedPreset === preset.id ? "active" : ""} onClick={() => applyProjectPreset(preset)}><b>{preset.title}</b><small>{preset.subtitle}</small></button>)}</div></section>
@@ -746,7 +844,7 @@ export default function PrintPilotClient({ user }: { user: AccountUser }) {
         {recommendation.cautions.length > 0 && <div className="cautions">{recommendation.cautions.map(c => <p key={c}><b>À surveiller</b>{c}</p>)}</div>}
         <div className="reasoning"><b>Pourquoi cette configuration ?</b><p>{useCase === "functional" ? "La pièce est fonctionnelle : les parois portent l’essentiel de la résistance, avec un remplissage raisonnable." : "Le réglage suit ton usage et ta priorité."} {loadDirection === "z" ? "Le risque de rupture entre couches est signalé : réoriente la pièce avant d’augmenter simplement le remplissage." : "L’orientation reste le premier levier avant les supports et le remplissage."}</p></div>
       </div>}
-    </div><aside className="inspector"><div className="inspector-head"><span>ANALYSE EN DIRECT</span><i className={mesh ? "live" : ""}></i></div><ModelCanvas stats={mesh}/>{mesh ? <><h3>{mesh.name}</h3><p className="muted">{mesh.triangles.length.toLocaleString("fr-FR")} triangles analysés localement</p><div className="stat-grid"><div><span>Dimensions X</span><b>{fmt(mesh.size[0], 1)} mm</b></div><div><span>Dimensions Y</span><b>{fmt(mesh.size[1], 1)} mm</b></div><div><span>Hauteur Z</span><b>{fmt(mesh.size[2], 1)} mm</b></div><div><span>Volume fermé</span><b>{fmt(mesh.volumeCm3, 1)} cm³</b></div></div><div className={`fit-check ${mesh.size[0] <= 260 && mesh.size[1] <= 260 && mesh.size[2] <= 300 ? "ok" : "bad"}`}><b>{mesh.size[0] <= 260 && mesh.size[1] <= 260 && mesh.size[2] <= 300 ? "✓ Compatible Creality Hi" : "× Hors volume Creality Hi"}</b><span>Volume utile 260 × 260 × 300 mm</span></div></> : <div className="empty-analysis"><h3>Aucun modèle chargé</h3><p>La recommandation fonctionne déjà avec tes critères. L’import STL ajoute dimensions, orientation et risque de supports.</p><button className="secondary full" onClick={() => setStep(1)}>Importer un STL</button></div>}<div className="principle"><span>RÈGLE N° 1</span><p>Orienter la pièce avant d’augmenter le remplissage ou d’activer des supports partout.</p></div></aside></section>
+    </div><aside className="inspector"><div className="inspector-head"><span>ANALYSE EN DIRECT</span><i className={mesh ? "live" : ""}></i></div><ModelCanvas stats={mesh} compact/>{mesh ? <><h3>{mesh.name}</h3><p className="muted">{mesh.triangles.length.toLocaleString("fr-FR")} triangles analysés localement</p><div className="stat-grid"><div><span>Dimensions X</span><b>{fmt(mesh.size[0], 1)} mm</b></div><div><span>Dimensions Y</span><b>{fmt(mesh.size[1], 1)} mm</b></div><div><span>Hauteur Z</span><b>{fmt(mesh.size[2], 1)} mm</b></div><div><span>Volume fermé</span><b>{fmt(mesh.volumeCm3, 1)} cm³</b></div></div><div className={`fit-check ${mesh.size[0] <= 260 && mesh.size[1] <= 260 && mesh.size[2] <= 300 ? "ok" : "bad"}`}><b>{mesh.size[0] <= 260 && mesh.size[1] <= 260 && mesh.size[2] <= 300 ? "✓ Compatible Creality Hi" : "× Hors volume Creality Hi"}</b><span>Volume utile 260 × 260 × 300 mm</span></div></> : <div className="empty-analysis"><h3>Aucun modèle chargé</h3><p>La recommandation fonctionne déjà avec tes critères. L’import STL ajoute dimensions, orientation et risque de supports.</p><button className="secondary full" onClick={() => setStep(1)}>Importer un STL</button></div>}<div className="principle"><span>RÈGLE N° 1</span><p>Orienter la pièce avant d’augmenter le remplissage ou d’activer des supports partout.</p></div></aside></section>
     <footer><span>PRINTPILOT HI · BÊTA PERSONNELLE</span><p>Les recommandations restent à valider dans l’aperçu du G-code avant impression.</p><button onClick={() => setTutorial("supports")}>Ouvrir le tutoriel</button></footer>
   </main>;
 }
