@@ -118,7 +118,7 @@ export type ProjectVerification = {
 function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle: string, enabled?: ExportDecision[]): Record<string, string> {
   const decisions = new Set<ExportDecision>(enabled ?? ["layer", "walls", "shells", "infill", "support", "brim", "ironing"]);
   const layer = nozzle === "0.6" ? 0.3 : layerNumber(settings.layer);
-  const ironingEnabled = settings.ironing !== "Désactivé";
+  const ironingEnabled = settings.ironing.startsWith("Toutes") || settings.ironing.startsWith("Surface");
   const overrides: Record<string, string> = {};
 
   if (decisions.has("layer")) overrides.layer_height = String(layer);
@@ -141,7 +141,7 @@ function conservativeProcessOverrides(settings: CrealityProjectSettings, nozzle:
     });
   }
   if (decisions.has("brim")) {
-    overrides.brim_type = settings.brim.startsWith("Bordure") ? "outer_only" : "auto_brim";
+    overrides.brim_type = settings.brim.startsWith("Bordure") ? "outer_only" : settings.brim.startsWith("Aucune") ? "no_brim" : "auto_brim";
     if (settings.brim.startsWith("Bordure")) overrides.brim_width = "5";
   }
   if (decisions.has("ironing")) {
