@@ -28,3 +28,26 @@ export function completeCrealityHiProcessProfile(layer: string): Record<string, 
   return profile;
 }
 
+function numeric(profile: Record<string, CrealityProfileValue>, key: string, fallback: number) {
+  const value = Number(String(profile[key] ?? fallback).replace("%", ""));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+export function crealityHiProfileSummary(layer: string) {
+  const profile = completeCrealityHiProcessProfile(layer);
+  return {
+    top: numeric(profile, "top_shell_layers", 5),
+    bottom: numeric(profile, "bottom_shell_layers", 3),
+    outer: numeric(profile, "outer_wall_speed", 150),
+    inner: numeric(profile, "inner_wall_speed", 300),
+    infill: numeric(profile, "sparse_infill_speed", 270),
+    topSpeed: numeric(profile, "top_surface_speed", 200),
+    acceleration: numeric(profile, "default_acceleration", 6000),
+    wallLoops: numeric(profile, "wall_loops", 2),
+    supportThreshold: numeric(profile, "support_threshold_angle", 30),
+    supportTopZ: numeric(profile, "support_top_z_distance", 0.2),
+    supportXY: numeric(profile, "support_object_xy_distance", 0.35),
+    supportInterfaceLayers: numeric(profile, "support_interface_top_layers", 2),
+    supportInterfaceSpacing: numeric(profile, "support_interface_spacing", 0.5),
+  };
+}
