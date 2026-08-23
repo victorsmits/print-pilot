@@ -100,6 +100,18 @@ Application Next/Vinext exécutée par Wrangler, avec base D1 locale, authentifi
 - `drizzle/` contient les migrations appliquées au démarrage ;
 - `tests/` vérifie l’analyse des supports et les exports 3MF.
 
+## Méthode de recommandation
+
+PrintPilot part des profils de processus officiels Creality Hi et n’écrase que les catégories explicitement justifiées par la géométrie, l’usage et la bobine sélectionnée. Les paramètres sensibles sans preuve suffisante restent ceux du profil officiel ou du 3MF importé.
+
+- Profils Creality Hi : <https://github.com/CrealityOfficial/CrealityPrint/tree/master/resources/profiles/Creality/process>
+- Paramètres Creality Print : <https://wiki.creality.com/en/software/creality-print/parameter-tabs>
+- Bordures et adhérence : <https://www.orcaslicer.com/wiki/print_settings/others/others_settings_brim.html>
+- Supports : <https://help.prusa3d.com/article/support-material_1698>
+- Débit volumique maximal : <https://www.orcaslicer.com/wiki/calibration/volumetric_speed_calib>
+
+Le mode Speed Print sélectionne un profil officiel à couche plus épaisse. Il ne force pas arbitrairement les vitesses ou accélérations ; une bobine non calibrée reste sur un profil prudent.
+
 ## Diagnostic Commands
 
 - `npm run install:ci`: perform the one bounded lockfile install
