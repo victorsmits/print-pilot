@@ -21,7 +21,7 @@ const project = buildCrealityProject({
   decisions: ["layer", "walls", "shells", "infill", "support", "brim", "ironing", "texture"],
   settings: {
     layer: "0,12 mm", walls: 4, topLayers: 5, bottomLayers: 5, infill: 25, infillPattern: "Gyroïde",
-    outerWallSpeed: 150, innerWallSpeed: 350, infillSpeed: 400, topSpeed: 200, acceleration: 6000, brim: "Bordure 5 mm", ironing: "Toutes les surfaces supérieures",
+    outerWallSpeed: 150, innerWallSpeed: 350, infillSpeed: 400, topSpeed: 200, acceleration: 6000, brim: "Aucune bordure", ironing: "Toutes les surfaces supérieures",
     texture: { action: "global", label: "Fine", fuzzySkin: "external", thickness: 0.12, pointDistance: 0.8, firstLayer: false },
     support: { enabled: true, type: "Arborescents (auto)", style: "Arborescents Organiques", threshold: 40, onPlateOnly: true, criticalOnly: false, topZ: 0.24, xy: 0.35, interfaceLayers: 4, interfaceSpacing: 0.25 },
   },
@@ -43,6 +43,7 @@ assert.equal(config.enable_prime_tower, "1", "la tour de purge du profil officie
 assert.equal(config.wall_loops, "4");
 assert.equal(config.sparse_infill_density, "25%");
 assert.equal(config.enable_support, "1");
+assert.equal(config.brim_type, "no_brim", "une base stable doit pouvoir désactiver explicitement la bordure");
 assert.equal(config.fuzzy_skin, "external");
 assert.equal(config.fuzzy_skin_thickness, "0.12");
 assert.equal(config.fuzzy_skin_point_distance, "0.8");
