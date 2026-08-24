@@ -9,6 +9,8 @@ import PrintHistoryPanel, { type PrintRun } from "./PrintHistoryPanel";
 import { buildCrealityProject, type ExportDecision } from "./threeMfExport";
 import { read3mfProject, settingString, type Imported3mfProject } from "./threeMfImport";
 import { agentPrompt, binaryStl, parsePrintPilotExchange, safeExchangeName, type PrintPilotExchange } from "./diagnosticExchange";
+import { crealityHiProfileSummary } from "./crealityHiProcessProfiles";
+import { assessBrim, assessSupport, selectLayerProfile } from "./recommendationRules";
 
 type Vec3 = [number, number, number];
 type Triangle = { a: Vec3; b: Vec3; c: Vec3; normal: Vec3; area: number };
@@ -21,6 +23,8 @@ type MeshStats = {
   overhangPercent: number;
   overhangAreaMm2: number;
   baseScore: number;
+  bedContactAreaMm2: number;
+  footprintAreaMm2: number;
   orientation: string;
   orientationNote: string;
 };
@@ -66,15 +70,6 @@ export type InventoryFilament = {
   abrasive?: boolean;
   calibrated?: boolean;
   notes?: string | null;
-};
-
-const PROFILE_BASES: Record<string, { top: number; bottom: number; outer: number; inner: number; infill: number; topSpeed: number; acceleration: number }> = {
-  "0,08 mm": { top: 10, bottom: 7, outer: 230, inner: 250, infill: 250, topSpeed: 180, acceleration: 4000 },
-  "0,12 mm": { top: 5, bottom: 5, outer: 150, inner: 350, infill: 400, topSpeed: 200, acceleration: 6000 },
-  "0,16 mm": { top: 6, bottom: 4, outer: 150, inner: 300, infill: 250, topSpeed: 200, acceleration: 6000 },
-  "0,20 mm": { top: 5, bottom: 3, outer: 150, inner: 300, infill: 270, topSpeed: 200, acceleration: 6000 },
-  "0,24 mm": { top: 4, bottom: 3, outer: 150, inner: 250, infill: 250, topSpeed: 200, acceleration: 6000 },
-  "0,28 mm": { top: 4, bottom: 3, outer: 150, inner: 250, infill: 200, topSpeed: 200, acceleration: 6000 },
 };
 
 const USES = [
@@ -210,7 +205,7 @@ function geometryForAxis(triangles: Triangle[], axis: 0 | 1 | 2, sign: 1 | -1) {
   }, 0);
   const other = ([0, 1, 2] as const).filter(i => i !== axis);
   const footprint = Math.max(1, (maxs[other[0]] - mins[other[0]]) * (maxs[other[1]] - mins[other[1]]));
-  return { axis, sign, support: supportArea / totalArea * 100, supportArea, base: Math.min(100, bedArea / footprint * 100), height: maxs[axis] - mins[axis] };
+  return { axis, sign, support: supportArea / totalArea * 100, supportArea, bedArea, footprint, base: Math.min(100, bedArea / footprint * 100), height: maxs[axis] - mins[axis] };
 }
 
 export function analyseMesh(name: string, triangles: Triangle[]): MeshStats {
@@ -230,7 +225,7 @@ export function analyseMesh(name: string, triangles: Triangle[]): MeshStats {
   const current = geometryForAxis(orientedTriangles, 2, 1), best = candidates[0], labels = ["X", "Y", "Z"];
   const orientation = best.axis === 2 && best.sign === 1 ? "Orientation actuelle" : `${best.sign === -1 ? "Retourner puis " : ""}poser l’axe ${labels[best.axis]}`;
   const gain = Math.max(0, current.support - best.support);
-  return { name, triangles: orientedTriangles, size, volumeCm3: Math.abs(signedVolume) / 1000, surfaceAreaMm2, overhangPercent: current.support, overhangAreaMm2: current.supportArea, baseScore: current.base, orientation, orientationNote: gain > 2 ? `Estimation : environ ${gain.toFixed(1)} points de surface à supporter en moins.` : "Le Z minimum du STL est posé sur le plateau ; cette orientation est déjà proche du meilleur compromis détecté." };
+  return { name, triangles: orientedTriangles, size, volumeCm3: Math.abs(signedVolume) / 1000, surfaceAreaMm2, overhangPercent: current.support, overhangAreaMm2: current.supportArea, baseScore: current.base, bedContactAreaMm2: current.bedArea, footprintAreaMm2: current.footprint, orientation, orientationNote: gain > 2 ? `Estimation : environ ${gain.toFixed(1)} points de surface à supporter en moins.` : "Le Z minimum du STL est posé sur le plateau ; cette orientation est déjà proche du meilleur compromis détecté." };
 }
 
 const ORIENTATIONS = [
@@ -425,11 +420,11 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
   const [useCase, setUseCase] = useState("functional"), [secondaryUses, setSecondaryUses] = useState<string[]>([]), [priority, setPriority] = useState("balance"), [precision, setPrecision] = useState("standard"), [visibleTop, setVisibleTop] = useState(true), [loadDirection, setLoadDirection] = useState("faible");
   const [environment, setEnvironment] = useState("inside"), [fitType, setFitType] = useState("none"), [supportAccess, setSupportAccess] = useState("easy"), [exposure, setExposure] = useState("normal");
   const [shapeClass, setShapeClass] = useState("prismatic"), [undersideFinish, setUndersideFinish] = useState("standard"), [featureSize, setFeatureSize] = useState("normal"), [textureIntent, setTextureIntent] = useState("preserve"), [nozzle, setNozzle] = useState("0.4");
-  const [filamentId, setFilamentId] = useState(""), [printer, setPrinter] = useState("hi"), [mode, setMode] = useState<"balanced" | "quality" | "fast">("balanced"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
+  const [filamentId, setFilamentId] = useState(""), [printer, setPrinter] = useState("hi"), [tutorial, setTutorial] = useState<HelpKey | null>(null);
   const [inventory, setInventory] = useState<InventoryFilament[]>([]), [inventoryOpen, setInventoryOpen] = useState(false), [inventoryLoading, setInventoryLoading] = useState(false), [accountOpen, setAccountOpen] = useState(false), [exportStatus, setExportStatus] = useState("");
-  const [appliedPreset, setAppliedPreset] = useState(""), [slicedHours, setSlicedHours] = useState(""), [slicedMinutes, setSlicedMinutes] = useState(""), [slicedGrams, setSlicedGrams] = useState(""), [electricityPrice, setElectricityPrice] = useState("0.30"), [averagePower, setAveragePower] = useState("120");
+  const [appliedPreset, setAppliedPreset] = useState("");
   const [imported3mf, setImported3mf] = useState<Imported3mfProject | null>(null), [sourceTriangles, setSourceTriangles] = useState<Triangle[]>([]), [orientationId, setOrientationId] = useState("current");
-  const [selectedDecisions, setSelectedDecisions] = useState<ExportDecision[]>(["layer", "walls", "shells", "infill", "support", "brim", "ironing"]);
+  const [selectedDecisions, setSelectedDecisions] = useState<ExportDecision[]>(["layer", "walls", "infill", "support", "brim"]);
   const [exportReceipt, setExportReceipt] = useState<Array<{ key: string; expected: string; actual: string | null; declared: boolean }> | null>(null);
   const [experienceMode, setExperienceMode] = useState<"guided" | "expert">("guided"), [historyOpen, setHistoryOpen] = useState(false), [historyLoading, setHistoryLoading] = useState(false), [prints, setPrints] = useState<PrintRun[]>([]);
   const [outcome, setOutcome] = useState<"success" | "mixed" | "failed">("success"), [qualityRating, setQualityRating] = useState(4), [defects, setDefects] = useState(""), [printNotes, setPrintNotes] = useState(""), [printStatus, setPrintStatus] = useState("");
@@ -530,29 +525,31 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
   }
   const recommendation = useMemo(() => {
     const activeUses = new Set([useCase, ...secondaryUses]);
-    const quality = mode === "quality" || priority === "quality" || precision === "fine" || (useCase === "decor" && mode !== "fast"), fast = mode === "fast" || priority === "speed" || useCase === "prototype";
-    let layer = quality ? "0,12 mm" : fast ? "0,24 mm" : "0,20 mm"; if (precision === "fine" && mode === "quality") layer = "0,08 mm"; if (precision === "rough" && mode === "fast") layer = "0,28 mm";
-    if (featureSize === "micro" && nozzle === "0.4" && mode !== "fast") layer = "0,08 mm";
-    if (nozzle === "0.6" && (layer === "0,08 mm" || layer === "0,12 mm")) layer = quality ? "0,16 mm" : "0,20 mm";
-    let walls = activeUses.has("functional") || priority === "strength" || activeUses.has("container") ? 4 : 3; if (mode === "fast") walls = Math.max(2, walls - 1);
-    const infill = priority === "strength" || activeUses.has("functional") ? 25 : activeUses.has("container") ? 18 : fast ? 10 : 15, pattern = priority === "strength" ? "Gyroïde" : "Cubique adaptatif", supportRatio = mesh?.overhangPercent ?? 0;
-    const base = PROFILE_BASES[layer] ?? PROFILE_BASES["0,20 mm"], layerMm = Number(layer.slice(0, 4).replace(",", "."));
-    const supportsEnabled = Boolean(mesh && supportRatio >= 2 && mesh.overhangAreaMm2 >= 35);
-    const treeSupport = shapeClass === "organic" || shapeClass === "tall";
-    const supportType = treeSupport ? "Arborescents (auto)" : "Normaux (auto)";
-    const supportStyle = treeSupport ? "Arborescents Organiques" : shapeClass === "broad" ? "Ajusté" : "Défaut";
-    const supportThreshold = undersideFinish === "clean" ? 40 : supportAccess === "closed" ? 20 : 30;
-    const supportOnPlateOnly = supportsEnabled && shapeClass !== "cavity" && supportAccess !== "closed" && supportRatio < 15;
-    const supportCriticalOnly = supportsEnabled && supportRatio < 11 && undersideFinish !== "clean" && shapeClass !== "broad";
-    const contactLayers = undersideFinish === "clean" ? 4 : supportAccess === "easy" ? 3 : 2;
-    const topZLayers = filament.family === "PETG" || supportAccess === "closed" ? 2 : 1;
-    const topZ = Math.max(layerMm, layerMm * topZLayers);
-    const supportXY = filament.family === "PETG" ? 0.45 : undersideFinish === "clean" ? 0.30 : 0.35;
-    const interfaceSpacing = undersideFinish === "clean" ? 0.25 : 0.5;
-    const support = supportsEnabled ? `${supportType} · ${supportThreshold}°` : "Désactivés";
-    const supportPlan = { enabled: supportsEnabled, type: supportType, style: supportStyle, threshold: supportThreshold, onPlateOnly: supportOnPlateOnly, criticalOnly: supportCriticalOnly, topZ, xy: supportXY, interfaceLayers: contactLayers, interfaceSpacing };
-    const brim = mesh && (mesh.baseScore < 7 || Math.max(...mesh.size) / Math.max(1, Math.min(...mesh.size.filter(v => v > 0))) > 5) ? "Bordure 5 mm" : "Auto / aucune";
-    const ironing = visibleTop && (activeUses.has("decor") || priority === "quality") ? "Toutes les surfaces supérieures" : "Désactivé", cautions: string[] = [];
+    const layerPlan = selectLayerProfile({ objective: priority, precision, featureSize, nozzle, filamentCalibrated: Boolean(filament.calibrated), maxVolumetricSpeed: filament.maxVolumetricSpeed });
+    const layer = layerPlan.layer;
+    const base = crealityHiProfileSummary(layer);
+    let walls = base.wallLoops;
+    if (priority === "strength" || loadDirection === "multi" || loadDirection === "z") walls = 4;
+    else if (activeUses.has("functional") || activeUses.has("container")) walls = 3;
+    if (layerPlan.speedPrint && priority !== "strength") walls = Math.min(walls, 3);
+    const infill = priority === "strength" ? 25 : activeUses.has("functional") ? 18 : activeUses.has("container") ? 15 : layerPlan.speedPrint ? 10 : 15;
+    const pattern = priority === "strength" || activeUses.has("functional") ? "Gyroïde" : "Cubique adaptatif";
+    const geometry = mesh ? { size: mesh.size, overhangPercent: mesh.overhangPercent, overhangAreaMm2: mesh.overhangAreaMm2, baseScore: mesh.baseScore, bedContactAreaMm2: mesh.bedContactAreaMm2 } : null;
+    const supportDecision = assessSupport({ geometry, shapeClass, supportAccess, objectCount: imported3mf?.objectCount ?? 1 });
+    const supportPlan = {
+      ...supportDecision,
+      threshold: base.supportThreshold,
+      onPlateOnly: false,
+      criticalOnly: false,
+      topZ: base.supportTopZ,
+      xy: base.supportXY,
+      interfaceLayers: base.supportInterfaceLayers,
+      interfaceSpacing: base.supportInterfaceSpacing,
+    };
+    const support = supportDecision.action === "enable" ? `${supportDecision.type} · seuil officiel ${base.supportThreshold}°` : supportDecision.action === "disable" ? "Désactivés" : supportDecision.action === "manual" ? "Analyse manuelle requise" : "Conserver le profil";
+    const brimPlan = assessBrim({ geometry, material: filament.family, shapeClass, speedPrint: layerPlan.speedPrint, objectCount: imported3mf?.objectCount ?? 1 });
+    const brim = brimPlan.label;
+    const ironing = visibleTop && (activeUses.has("decor") || priority === "quality") ? "Optionnel · après calibration" : "Conserver le profil", cautions: string[] = [];
     const texturePresets: Record<string, { label: string; action: "preserve" | "disable" | "global" | "localized"; fuzzySkin: "none" | "external"; thickness: number | null; pointDistance: number | null; firstLayer: boolean }> = {
       preserve: { label: "Conserver le réglage existant", action: "preserve", fuzzySkin: "none", thickness: null, pointDistance: null, firstLayer: false },
       none: { label: "Désactivée", action: "disable", fuzzySkin: "none", thickness: null, pointDistance: null, firstLayer: false },
@@ -572,32 +569,27 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
     if (exposure === "heat" && filament.family.startsWith("PLA")) cautions.push("Risque thermique : le PLA peut se déformer dans une voiture, près d’une source chaude ou en plein soleil.");
     if (activeUses.has("fit") && fitType === "none") cautions.push("L’usage Ajustement est sélectionné : précise le type d’ajustement pour affiner le conseil.");
     if (fitType !== "none") cautions.push("L’ajustement ne peut pas être garanti par une valeur universelle : imprime une petite éprouvette de jeu avant la pièce finale.");
-    if (supportAccess === "closed" && supportRatio >= 2) cautions.push("Les supports seraient difficiles à retirer dans cette cavité : privilégie une autre orientation ou sépare la pièce.");
-    if (shapeClass === "cavity") cautions.push(supportsEnabled ? "Une cavité fermée peut emprisonner les supports. Vérifie leur chemin de retrait ou coupe temporairement la pièce pour l’impression." : "La forme indique une cavité, mais elle n’active pas automatiquement les supports : vérifie les îlots après tranchage.");
-    if (shapeClass === "broad" && !supportsEnabled) cautions.push("Un large dessous plat posé sur le plateau n’a pas besoin de support ; surveille surtout l’adhérence et le gauchissement.");
-    if (undersideFinish === "clean" && supportsEnabled) cautions.push("Une face inférieure propre exige une interface plus dense, mais elle peut devenir plus difficile à détacher : imprime un coupon de contact si la face est critique.");
+    if (supportDecision.action === "manual") cautions.push(supportDecision.reason);
+    if (shapeClass === "cavity") cautions.push("Une cavité fermée peut emprisonner les supports. Vérifie leur chemin de retrait ou coupe temporairement la pièce pour l’impression.");
+    if (shapeClass === "broad" && !supportDecision.enabled) cautions.push("Un large dessous plat posé sur le plateau n’a pas besoin de support ; surveille surtout l’adhérence et le gauchissement.");
+    if (undersideFinish === "clean" && supportDecision.enabled) cautions.push("La qualité d’une face sur support dépend surtout de l’interface et du jeu Z. PrintPilot conserve les valeurs officielles : ajuste-les seulement après un coupon de contact.");
     if (nozzle === "0.6") cautions.push("Les profils officiels détaillés affichés ci-dessous sont ceux de la buse 0,4 mm. La hauteur est adaptée, mais les vitesses doivent être validées avec ton profil 0,6 mm.");
     if (!filament.calibrated) cautions.push("Cette bobine n’est pas marquée comme calibrée : débit, pressure advance et débit volumique maximal restent à confirmer.");
     if (printer !== "hi") cautions.push("L’imprimante active n’est pas la Creality Hi : les profils et limites peuvent être incorrects.");
     if (mesh && mesh.overhangPercent > 10) cautions.push("Beaucoup de faces descendantes détectées : tester l’orientation proposée avant d’ajouter des supports.");
     if (texture.action === "global" && (activeUses.has("container") || exposure === "water")) cautions.push("La peau floue reste extérieure, mais évite-la sur les portées de joint, zones collées ou surfaces devant rester faciles à nettoyer.");
-    return { layer, walls, infill, pattern, support, supportPlan, brim, ironing, texture, cautions, base };
-  }, [mode, priority, precision, useCase, secondaryUses, mesh, visibleTop, filament, printer, environment, exposure, fitType, supportAccess, shapeClass, undersideFinish, featureSize, textureIntent, nozzle]);
+    if (layerPlan.speedGuard) cautions.push(layerPlan.speedGuard);
+    return { layer, walls, infill, pattern, support, supportPlan, brim, brimPlan, ironing, texture, cautions, base, speedPrint: layerPlan.speedPrint, speedGuard: layerPlan.speedGuard };
+  }, [priority, precision, useCase, secondaryUses, mesh, visibleTop, filament, printer, environment, exposure, fitType, supportAccess, shapeClass, undersideFinish, featureSize, textureIntent, nozzle, loadDirection, imported3mf?.objectCount]);
   const effectiveSelectedDecisions = useMemo<ExportDecision[]>(() =>
-    recommendation.texture.action === "preserve" || recommendation.texture.action === "localized"
-      ? selectedDecisions.filter(item => item !== "texture")
-      : selectedDecisions,
-  [recommendation.texture.action, selectedDecisions]);
-  const slicedCost = useMemo(() => {
-    const hours = Math.max(0, Number(slicedHours.replace(",", ".")) || 0) + Math.max(0, Number(slicedMinutes.replace(",", ".")) || 0) / 60;
-    const grams = Math.max(0, Number(slicedGrams.replace(",", ".")) || 0);
-    const kwhPrice = Math.max(0, Number(electricityPrice.replace(",", ".")) || 0);
-    const powerW = Math.max(0, Number(averagePower.replace(",", ".")) || 0);
-    const materialCost = grams > 0 && filament.pricePerKg != null ? grams * filament.pricePerKg / 1000 : null;
-    const energyCost = hours > 0 ? hours * powerW / 1000 * kwhPrice : null;
-    const totalCost = materialCost != null && energyCost != null ? materialCost + energyCost : null;
-    return { hours, grams, materialCost, energyCost, totalCost };
-  }, [slicedHours, slicedMinutes, slicedGrams, electricityPrice, averagePower, filament.pricePerKg]);
+    selectedDecisions.filter(item => {
+      if (item === "texture") return recommendation.texture.action !== "preserve" && recommendation.texture.action !== "localized";
+      if (item === "brim") return recommendation.brimPlan.action !== "preserve";
+      if (item === "support") return recommendation.supportPlan.action === "enable";
+      if (item === "ironing") return recommendation.ironing === "Toutes les surfaces supérieures";
+      return true;
+    }),
+  [recommendation.texture.action, recommendation.brimPlan.action, recommendation.supportPlan.action, recommendation.ironing, selectedDecisions]);
   const exchangeConfiguration = useMemo<PrintPilotExchange>(() => ({
     format: "printpilot-configuration",
     version: 1,
@@ -610,13 +602,13 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
       bedTempMin: filament.bedTempMin ?? null, bedTempMax: filament.bedTempMax ?? null, maxVolumetricSpeed: filament.maxVolumetricSpeed ?? null,
       flowRatio: filament.flowRatio ?? null, pressureAdvance: filament.pressureAdvance ?? null, calibrated: Boolean(filament.calibrated), abrasive: Boolean(filament.abrasive),
     },
-    criteria: { useCase, secondaryUses, priority, precision, visibleTop, loadDirection, environment, fitType, supportAccess, exposure, shapeClass, undersideFinish, featureSize, textureIntent, mode, appliedPreset },
-    geometry: mesh ? { sizeMm: mesh.size, triangleCount: mesh.triangles.length, volumeCm3: mesh.volumeCm3, surfaceAreaMm2: mesh.surfaceAreaMm2, overhangPercent: mesh.overhangPercent, overhangAreaMm2: mesh.overhangAreaMm2, baseScore: mesh.baseScore, orientation: mesh.orientation, orientationNote: mesh.orientationNote } : null,
+    criteria: { useCase, secondaryUses, priority, precision, visibleTop, loadDirection, environment, fitType, supportAccess, exposure, shapeClass, undersideFinish, featureSize, textureIntent, appliedPreset },
+    geometry: mesh ? { sizeMm: mesh.size, triangleCount: mesh.triangles.length, volumeCm3: mesh.volumeCm3, surfaceAreaMm2: mesh.surfaceAreaMm2, overhangPercent: mesh.overhangPercent, overhangAreaMm2: mesh.overhangAreaMm2, baseScore: mesh.baseScore, bedContactAreaMm2: mesh.bedContactAreaMm2, footprintAreaMm2: mesh.footprintAreaMm2, orientation: mesh.orientation, orientationNote: mesh.orientationNote } : null,
     imported3mf: imported3mf ? { printerProfile: imported3mf.printerProfile, processProfile: imported3mf.processProfile, filamentProfiles: imported3mf.filamentProfiles, objectCount: imported3mf.objectCount, plateCount: imported3mf.plateCount, projectSettings: imported3mf.projectSettings } : null,
     recommendation: { ...recommendation },
     selectedDecisions: effectiveSelectedDecisions,
-    printResult: { outcome, qualityRating, defects, notes: printNotes, slicedHours, slicedMinutes, slicedGrams, electricityPricePerKwh: electricityPrice, averagePowerW: averagePower, materialCost: slicedCost.materialCost, energyCost: slicedCost.energyCost, totalCost: slicedCost.totalCost },
-  }), [mesh, sourceFingerprint, imported3mf, orientationId, printer, nozzle, filament, useCase, secondaryUses, priority, precision, visibleTop, loadDirection, environment, fitType, supportAccess, exposure, shapeClass, undersideFinish, featureSize, textureIntent, mode, appliedPreset, recommendation, effectiveSelectedDecisions, outcome, qualityRating, defects, printNotes, slicedHours, slicedMinutes, slicedGrams, electricityPrice, averagePower, slicedCost]);
+    printResult: { outcome, qualityRating, defects, notes: printNotes },
+  }), [mesh, sourceFingerprint, imported3mf, orientationId, printer, nozzle, filament, useCase, secondaryUses, priority, precision, visibleTop, loadDirection, environment, fitType, supportAccess, exposure, shapeClass, undersideFinish, featureSize, textureIntent, appliedPreset, recommendation, effectiveSelectedDecisions, outcome, qualityRating, defects, printNotes]);
   const promptForAgent = useMemo(() => agentPrompt(exchangeConfiguration), [exchangeConfiguration]);
   const orientationChoices = useMemo(() => {
     if (!sourceTriangles.length || (imported3mf?.plateCount ?? 1) > 1) return [];
@@ -636,9 +628,9 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
       { id: "walls", label: "Parois", current: current("wall_loops"), recommended: String(recommendation.walls) },
       { id: "shells", label: "Dessus / dessous", current: `${current("top_shell_layers")} / ${current("bottom_shell_layers")}`, recommended: `${recommendation.base.top} / ${recommendation.base.bottom}` },
       { id: "infill", label: "Remplissage", current: `${current("sparse_infill_density")} · ${current("sparse_infill_pattern")}`, recommended: `${recommendation.infill}% · ${recommendation.pattern}` },
-      { id: "support", label: "Supports", current: current("enable_support", "Désactivés") === "1" ? "Activés" : "Désactivés", recommended: recommendation.supportPlan.enabled ? recommendation.support : "Désactivés" },
-      { id: "brim", label: "Bordure", current: current("brim_type"), recommended: recommendation.brim },
-      { id: "ironing", label: "Lissage", current: current("ironing_type", "Désactivé"), recommended: recommendation.ironing },
+      { id: "support", label: "Supports", current: current("enable_support", "Désactivés") === "1" ? "Activés" : "Désactivés", recommended: recommendation.support, disabled: recommendation.supportPlan.action !== "enable" },
+      { id: "brim", label: "Bordure", current: current("brim_type"), recommended: recommendation.brim, disabled: recommendation.brimPlan.action === "preserve" },
+      { id: "ironing", label: "Lissage", current: current("ironing_type", "Désactivé"), recommended: recommendation.ironing, disabled: true },
       { id: "texture", label: "Texturage", current: current("fuzzy_skin", "Non modifié"), recommended: recommendation.texture.label, disabled: recommendation.texture.action === "preserve" || recommendation.texture.action === "localized" },
     ];
     return experienceMode === "expert" ? rows : rows.filter(row => !imported3mf || row.current.toLowerCase() !== row.recommended.toLowerCase());
@@ -648,9 +640,9 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
     { label: "Profil / couche", value: recommendation.layer, reason: "Choisi selon précision et priorité" },
     { label: "Parois", value: `${recommendation.walls}`, reason: "Adaptées aux usages sélectionnés" },
     { label: "Remplissage", value: `${recommendation.infill}% · ${recommendation.pattern}`, reason: "Compromis usage / résistance" },
-    { label: "Supports", value: recommendation.supportPlan.enabled ? recommendation.support : "Désactivés", reason: "Décision issue du STL orienté" },
-    ...(recommendation.brim.startsWith("Bordure") ? [{ label: "Bordure", value: recommendation.brim, reason: "Contact plateau jugé insuffisant" }] : []),
-    ...(recommendation.ironing !== "Désactivé" ? [{ label: "Lissage", value: recommendation.ironing, reason: "Dessus visible et finition prioritaire" }] : []),
+    { label: "Supports", value: recommendation.support, reason: recommendation.supportPlan.reason },
+    ...(recommendation.brimPlan.action !== "preserve" ? [{ label: "Bordure", value: recommendation.brim, reason: recommendation.brimPlan.reason }] : []),
+    ...(recommendation.speedPrint ? [{ label: "Speed Print", value: recommendation.layer, reason: recommendation.speedGuard ?? "Profil officiel rapide, sans dépasser les limites calibrées de la bobine" }] : []),
     ...(recommendation.texture.action !== "preserve" ? [{ label: "Texturage", value: recommendation.texture.label, reason: recommendation.texture.action === "localized" ? "À peindre manuellement sur la géométrie" : "Choix explicite de l’utilisateur" }] : []),
   ];
   function exportProject() {
@@ -724,6 +716,9 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
       if (text("useCase")) setUseCase(text("useCase")!);
       if (Array.isArray(criteria.secondaryUses)) setSecondaryUses(criteria.secondaryUses.map(String).slice(0, 2));
       if (text("priority")) setPriority(text("priority")!);
+      else if (text("mode") === "fast") setPriority("speed");
+      else if (text("mode") === "quality") setPriority("quality");
+      else if (text("mode") === "balanced") setPriority("balance");
       if (text("precision")) setPrecision(text("precision")!);
       if (boolean("visibleTop") != null) setVisibleTop(boolean("visibleTop")!);
       if (text("loadDirection")) setLoadDirection(text("loadDirection")!);
@@ -736,7 +731,6 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
       if (text("featureSize")) setFeatureSize(text("featureSize")!);
       const importedTextureIntent = ["preserve", "none", "fine", "medium", "grip", "localized"].includes(text("textureIntent") ?? "") ? text("textureIntent")! : "preserve";
       setTextureIntent(importedTextureIntent);
-      if (["balanced", "quality", "fast"].includes(text("mode") ?? "")) setMode(text("mode") as typeof mode);
       setAppliedPreset(text("appliedPreset") ?? "");
       const allowed: ExportDecision[] = ["layer", "walls", "shells", "infill", "support", "brim", "ironing", "texture"];
       const importedFit = text("fitType") ?? "none", importedFeature = text("featureSize") ?? "normal";
@@ -745,9 +739,7 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
       const result = imported.printResult;
       if (["success", "mixed", "failed"].includes(String(result.outcome))) setOutcome(String(result.outcome) as typeof outcome);
       if (Number.isFinite(Number(result.qualityRating))) setQualityRating(Math.max(1, Math.min(5, Number(result.qualityRating))));
-      setDefects(String(result.defects ?? "")); setPrintNotes(String(result.notes ?? "")); setSlicedHours(String(result.slicedHours ?? "")); setSlicedMinutes(String(result.slicedMinutes ?? "")); setSlicedGrams(String(result.slicedGrams ?? ""));
-      if (result.electricityPricePerKwh != null) setElectricityPrice(String(result.electricityPricePerKwh));
-      if (result.averagePowerW != null) setAveragePower(String(result.averagePowerW));
+      setDefects(String(result.defects ?? "")); setPrintNotes(String(result.notes ?? ""));
       const sameModel = Boolean(mesh && sourceFingerprint && imported.source.fingerprint === sourceFingerprint);
       if (sameModel && imported.source.orientationId) chooseOrientation(imported.source.orientationId);
       setStep(4);
@@ -758,8 +750,7 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
   async function savePrint() {
     if (!user) { setPrintStatus("Connecte-toi pour enregistrer l’historique."); return; }
     const response = await fetch("/api/prints", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-      name: mesh?.name ?? "Projet PrintPilot", sourceFileName: mesh?.name, filamentId: filament.dbId ?? null, durationMinutes: Math.round(slicedCost.hours * 60) || null,
-      filamentUsedG: slicedCost.grams || null, materialCost: slicedCost.materialCost, energyCost: slicedCost.energyCost, totalCost: slicedCost.totalCost,
+      name: mesh?.name ?? "Projet PrintPilot", sourceFileName: mesh?.name, filamentId: filament.dbId ?? null,
       outcome, qualityRating, defects, notes: printNotes, settings: { recommendation, selectedDecisions: effectiveSelectedDecisions, orientationId, filament: filament.label },
     }) });
     const payload = await response.json() as { error?: string };
@@ -803,7 +794,8 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
         <section className="preset-picker"><div><span>DÉMARRAGES RAPIDES</span><p>Un preset préremplit le questionnaire. Tu peux ensuite modifier chaque réponse ; les supports restent calculés depuis le STL.</p></div><div className="preset-grid">{PROJECT_PRESETS.map(preset => <button key={preset.id} className={appliedPreset === preset.id ? "active" : ""} onClick={() => applyProjectPreset(preset)}><b>{preset.title}</b><small>{preset.subtitle}</small></button>)}</div></section>
         <div className="usage-heading"><b>Choisis un usage principal</b><span>Puis ajoute jusqu’à 2 usages secondaires · {secondaryUses.length}/2 sélectionné(s)</span></div>
         <div className="choice-grid">{USES.map(u => { const primary = useCase === u.id, secondary = secondaryUses.includes(u.id), limitReached = secondaryUses.length >= 2 && !secondary; return <div key={u.id} className={`choice-card usage-card ${primary ? "selected" : ""} ${secondary ? "secondary-selected" : ""}`}><button className="usage-primary" onClick={() => choosePrimaryUse(u.id)}><span className="choice-radio"></span><b>{u.title}</b><small>{u.subtitle}</small></button><label><input type="checkbox" checked={secondary} disabled={primary || limitReached} onChange={() => toggleSecondaryUse(u.id)}/><span>{primary ? "Usage principal" : "Ajouter en secondaire"}</span></label></div>; })}</div>
-        <div className="form-grid"><fieldset><legend><InfoLabel item="priority">Priorité</InfoLabel></legend><div className="segmented">{[["quality","Finition"],["balance","Équilibre"],["speed","Rapidité"],["strength","Solidité"]].map(([id,label]) => <button key={id} className={priority === id ? "active" : ""} onClick={() => setPriority(id)}>{label}</button>)}</div></fieldset><fieldset><legend><InfoLabel item="precision">Précision souhaitée</InfoLabel></legend><div className="segmented three">{[["fine","Fine"],["standard","Standard"],["rough","Large"]].map(([id,label]) => <button key={id} className={precision === id ? "active" : ""} onClick={() => setPrecision(id)}>{label}</button>)}</div></fieldset><label className="switch-row"><span><b><InfoLabel item="visibleTop">Face supérieure visible</InfoLabel></b><small>Peut justifier le lissage</small></span><input type="checkbox" checked={visibleTop} onChange={e => setVisibleTop(e.target.checked)}/><i></i></label><label className="select-row"><span><b><InfoLabel item="loadDirection">Effort mécanique</InfoLabel></b><small>Direction et intensité attendues</small></span><select value={loadDirection} onChange={e => setLoadDirection(e.target.value)}><option value="faible">Faible / décoratif</option><option value="xy">Principalement dans le plan XY</option><option value="z">Risque entre couches Z</option><option value="multi">Multidirectionnel</option></select></label><label className="select-row texture-choice"><span><b><InfoLabel item="textureIntent">Texturage extérieur</InfoLabel></b><small>Jamais activé automatiquement</small></span><select value={textureIntent} onChange={e => chooseTextureIntent(e.target.value)}><option value="preserve">Ne pas modifier</option><option value="none">Désactiver explicitement</option><option value="fine">Texture fine décorative</option><option value="medium">Texture moyenne</option><option value="grip">Texture forte / grip</option><option value="localized">Peinture localisée manuelle</option></select></label></div>
+        <div className="form-grid"><fieldset><legend><InfoLabel item="priority">Priorité</InfoLabel></legend><div className="segmented">{[["quality","Finition"],["balance","Équilibre"],["speed","Speed Print"],["strength","Solidité"]].map(([id,label]) => <button key={id} className={priority === id ? "active" : ""} onClick={() => setPriority(id)}>{label}</button>)}</div></fieldset><fieldset><legend><InfoLabel item="precision">Précision souhaitée</InfoLabel></legend><div className="segmented three">{[["fine","Fine"],["standard","Standard"],["rough","Large"]].map(([id,label]) => <button key={id} className={precision === id ? "active" : ""} onClick={() => setPrecision(id)}>{label}</button>)}</div></fieldset><label className="switch-row"><span><b><InfoLabel item="visibleTop">Face supérieure visible</InfoLabel></b><small>Peut justifier le lissage</small></span><input type="checkbox" checked={visibleTop} onChange={e => setVisibleTop(e.target.checked)}/><i></i></label><label className="select-row"><span><b><InfoLabel item="loadDirection">Effort mécanique</InfoLabel></b><small>Direction et intensité attendues</small></span><select value={loadDirection} onChange={e => setLoadDirection(e.target.value)}><option value="faible">Faible / décoratif</option><option value="xy">Principalement dans le plan XY</option><option value="z">Risque entre couches Z</option><option value="multi">Multidirectionnel</option></select></label><label className="select-row texture-choice"><span><b><InfoLabel item="textureIntent">Texturage extérieur</InfoLabel></b><small>Jamais activé automatiquement</small></span><select value={textureIntent} onChange={e => chooseTextureIntent(e.target.value)}><option value="preserve">Ne pas modifier</option><option value="none">Désactiver explicitement</option><option value="fine">Texture fine décorative</option><option value="medium">Texture moyenne</option><option value="grip">Texture forte / grip</option><option value="localized">Peinture localisée manuelle</option></select></label></div>
+        {priority === "speed" && <section className="speed-print-card"><div><span>SPEED PRINT</span><h3>Plus rapide, mais toujours borné par le profil officiel</h3></div><p>PrintPilot choisit d’abord un profil Creality plus épais et réduit les éléments coûteux. Il n’augmente pas arbitrairement les vitesses : le débit volumique maximal de la bobine doit être calibré avant d’aller plus loin.</p></section>}
         <details className="advanced-criteria" open={experienceMode === "expert"}><summary>Critères avancés {experienceMode === "guided" ? "· facultatif" : "· mode expert"}</summary><div className="criteria-grid">
           <label><InfoLabel item="shapeClass">Forme globale</InfoLabel><select value={shapeClass} onChange={e => setShapeClass(e.target.value)}><option value="prismatic">Mécanique / prismatique</option><option value="organic">Organique / figurine</option><option value="tall">Fine et haute</option><option value="broad">Large dessous plat</option><option value="cavity">Cavité ou tunnel interne</option></select></label>
           <label><InfoLabel item="featureSize">Plus petit détail</InfoLabel><select value={featureSize} onChange={e => setFeatureSize(e.target.value)}><option value="normal">Supérieur à 1,2 mm</option><option value="fine">Entre 0,6 et 1,2 mm</option><option value="micro">Inférieur à 0,6 mm</option></select></label>
@@ -815,10 +807,10 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
         </div></details>
         <Actions back={() => setStep(1)} next={() => setStep(3)} nextLabel="Choisir le filament"/>
       </div>}
-      {step === 3 && <div className="step-panel"><div className="section-title"><div><span className="eyebrow">ÉTAPE 03</span><h2>Choisis la bobine</h2></div>{user && <button className="secondary" onClick={() => setInventoryOpen(true)}>Gérer l’inventaire</button>}</div>{!user ? <section className="auth-gate"><span>INVENTAIRE PRIVÉ</span><h3>Connecte-toi pour accéder à tes bobines</h3><p>Aucune bobine ni donnée de compte n’est affichée sans session. Ton STL reste analysé localement dans le navigateur.</p><a className="primary account-link" href="/auth/google?return_to=%2F">Se connecter avec Google</a></section> : inventoryLoading ? <section className="inventory-empty"><h3>Chargement de l’inventaire…</h3></section> : inventory.length === 0 ? <section className="inventory-empty"><span>INVENTAIRE VIDE</span><h3>Aucune bobine enregistrée</h3><p>Ajoute ta première bobine pour adapter les températures, le coût, le débit et les conseils de calibration.</p><button className="primary" onClick={() => setInventoryOpen(true)}>Ajouter une bobine</button></section> : <><div className="filament-list">{inventory.map(f => <button key={f.id} className={`filament-row ${filamentId === f.id ? "selected" : ""}`} onClick={() => setFilamentId(f.id)}><span className={`spool ${f.family.toLowerCase().replace(" ", "-")}`} style={f.colorHex ? { borderColor: f.colorHex } : undefined}></span><span><b>{f.label}</b><small>{f.remainingG != null ? `${fmt(f.remainingG)} g restants · ` : "Quantité inconnue · "}{f.note}</small></span><em>{f.family}</em></button>)}</div><div className="rfid-note"><b>Bobine RFID verrouillée ?</b><span>Retire puis réinsère la bobine et déclare-la manuellement si Creality Print empêche l’édition.</span><button onClick={() => setTutorial("filament")}>Voir où régler</button></div></>}<Actions back={() => setStep(2)} next={() => setStep(4)} nextLabel="Calculer la configuration" disabled={!user || inventory.length === 0 || !filamentId}/></div>}
+      {step === 3 && <div className="step-panel"><div className="section-title"><div><span className="eyebrow">ÉTAPE 03</span><h2>Choisis la bobine</h2></div>{user && <button className="secondary" onClick={() => setInventoryOpen(true)}>Gérer l’inventaire</button>}</div>{!user ? <section className="auth-gate"><span>INVENTAIRE PRIVÉ</span><h3>Connecte-toi pour accéder à tes bobines</h3><p>Aucune bobine ni donnée de compte n’est affichée sans session. Ton STL reste analysé localement dans le navigateur.</p><a className="primary account-link" href="/auth/google?return_to=%2F">Se connecter avec Google</a></section> : inventoryLoading ? <section className="inventory-empty"><h3>Chargement de l’inventaire…</h3></section> : inventory.length === 0 ? <section className="inventory-empty"><span>INVENTAIRE VIDE</span><h3>Aucune bobine enregistrée</h3><p>Ajoute ta première bobine pour adapter les températures, le débit et les conseils de calibration.</p><button className="primary" onClick={() => setInventoryOpen(true)}>Ajouter une bobine</button></section> : <><div className="filament-list">{inventory.map(f => <button key={f.id} className={`filament-row ${filamentId === f.id ? "selected" : ""}`} onClick={() => setFilamentId(f.id)}><span className={`spool ${f.family.toLowerCase().replace(" ", "-")}`} style={f.colorHex ? { borderColor: f.colorHex } : undefined}></span><span><b>{f.label}</b><small>{f.remainingG != null ? `${fmt(f.remainingG)} g restants · ` : "Quantité inconnue · "}{f.note}</small></span><em>{f.family}</em></button>)}</div><div className="rfid-note"><b>Bobine RFID verrouillée ?</b><span>Retire puis réinsère la bobine et déclare-la manuellement si Creality Print empêche l’édition.</span><button onClick={() => setTutorial("filament")}>Voir où régler</button></div></>}<Actions back={() => setStep(2)} next={() => setStep(4)} nextLabel="Calculer la configuration" disabled={!user || inventory.length === 0 || !filamentId}/></div>}
       {step === 4 && <div className="step-panel result-panel">
-        <div className="section-title"><div><span className="eyebrow">ÉTAPE 04</span><h2>Configuration conseillée</h2></div><span className="confidence">CONFIANCE {mesh ? "ÉLEVÉE" : "MOYENNE"}</span></div>
-        <div className="mode-tabs">{[["quality","Qualité"],["balanced","Recommandée"],["fast","Rapide"]].map(([id,label]) => <button key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id as typeof mode)}>{label}{id === "balanced" && <small>MEILLEUR COMPROMIS</small>}</button>)}</div>
+        <div className="section-title"><div><span className="eyebrow">ÉTAPE 04</span><h2>Configuration conseillée</h2></div><span className="confidence">{mesh ? "GÉOMÉTRIE ANALYSÉE" : "CRITÈRES SEULS"}</span></div>
+        {recommendation.speedPrint && <section className="speed-print-card result"><div><span>SPEED PRINT ACTIF</span><h3>{recommendation.layer}</h3></div><p>{recommendation.speedGuard ?? "Les vitesses et accélérations restent celles du profil Creality Hi sélectionné."}</p></section>}
         <div className="result-grid"><div className="recipe">
           <div className="recipe-head"><div><span>PROFIL OFFICIEL DE BASE</span><b>{recommendation.layer}</b></div><span className="pill">{filament.family}</span></div>
           <Setting icon="↕" label="Hauteur de couche" value={recommendation.layer} onHelp={() => setTutorial("layer")}/>
@@ -832,13 +824,12 @@ export default function PrintPilotClient({ user, authError = null }: { user: Acc
           <div className="official-speeds"><span>VALEURS DU PROFIL CREALITY HI</span><b>Paroi ext. {recommendation.base.outer} mm/s</b><b>Paroi int. {recommendation.base.inner} mm/s</b><b>Surface sup. {recommendation.base.topSpeed} mm/s</b><b>Accélération {recommendation.base.acceleration} mm/s²</b></div>
           <div className="filament-tech"><span>BOBINE SÉLECTIONNÉE</span><b>{filament.label}</b><div><em>Buse</em><strong>{filament.nozzleTempMin != null || filament.nozzleTempMax != null ? `${filament.nozzleTempMin ?? "?"}–${filament.nozzleTempMax ?? "?"} °C` : "À compléter"}</strong></div><div><em>Plateau</em><strong>{filament.bedTempMin != null || filament.bedTempMax != null ? `${filament.bedTempMin ?? "?"}–${filament.bedTempMax ?? "?"} °C` : "À compléter"}</strong></div><div><em>Débit max.</em><strong>{filament.maxVolumetricSpeed != null ? `${filament.maxVolumetricSpeed} mm³/s` : "À calibrer"}</strong></div><div><em>PA / débit</em><strong>{filament.pressureAdvance != null || filament.flowRatio != null ? `${filament.pressureAdvance ?? "?"} / ${filament.flowRatio ?? "?"}` : "À calibrer"}</strong></div></div>
         </div><div className="support-card">
-          <div className="card-label"><span>ANALYSE DES SUPPORTS</span><b>{mesh ? "ORIENTATION STL" : "À CONFIRMER"}</b></div><div className="support-score"><span>{mesh ? fmt(mesh.overhangPercent, 1) : "—"}<small>%</small></span><p>surface descendante hors plateau<br/>sous le seuil de 30°</p></div><div className="meter"><i style={{width: `${Math.min(100, mesh?.overhangPercent ?? 0)}%`}}></i></div><div className="support-verdict"><span className={!recommendation.supportPlan.enabled ? "ok" : "warn"}>{!recommendation.supportPlan.enabled ? "SANS SUPPORT PROBABLE" : "PLAN DE SUPPORT PROPOSÉ"}</span><h3>{mesh?.orientation ?? "Importe un STL pour l’analyse"}</h3><p>{mesh?.orientationNote ?? "Sans STL, PrintPilot ne décide plus d’activer les supports uniquement à partir d’une catégorie de forme."}</p></div>
+          <div className="card-label"><span>ANALYSE DES SUPPORTS</span><b>{mesh ? "ORIENTATION STL" : "À CONFIRMER"}</b></div><div className="support-score"><span>{mesh ? fmt(mesh.overhangPercent, 1) : "—"}<small>%</small></span><p>surface descendante hors plateau<br/>sous le seuil de 30°</p></div><div className="meter"><i style={{width: `${Math.min(100, mesh?.overhangPercent ?? 0)}%`}}></i></div><div className="support-verdict"><span className={!recommendation.supportPlan.enabled ? "ok" : "warn"}>{recommendation.supportPlan.action === "manual" ? "VÉRIFICATION MANUELLE" : !recommendation.supportPlan.enabled ? "SANS SUPPORT PROBABLE" : "PLAN DE SUPPORT PROPOSÉ"}</span><h3>{mesh?.orientation ?? "Importe un STL pour l’analyse"}</h3><p>{recommendation.supportPlan.reason}</p></div>
           <div className="support-plan"><span>RÉGLAGES À REPORTER</span><dl><div><dt>Activer</dt><dd>{recommendation.supportPlan.enabled ? "Oui" : "Non"}</dd></div><div><dt>Type / style</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.type} · ${recommendation.supportPlan.style}` : "—"}</dd></div><div><dt>Angle de seuil</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.threshold}°` : "—"}</dd></div><div><dt>Sur plateau uniquement</dt><dd>{recommendation.supportPlan.enabled ? (recommendation.supportPlan.onPlateOnly ? "Oui" : "Non") : "—"}</dd></div><div><dt>Régions critiques seules</dt><dd>{recommendation.supportPlan.enabled ? (recommendation.supportPlan.criticalOnly ? "Oui" : "Non") : "—"}</dd></div><div><dt>Distance Z supérieure</dt><dd>{recommendation.supportPlan.enabled ? `${fmt(recommendation.supportPlan.topZ, 2)} mm` : "—"}</dd></div><div><dt>Distance support/objet XY</dt><dd>{recommendation.supportPlan.enabled ? `${fmt(recommendation.supportPlan.xy, 2)} mm` : "—"}</dd></div><div><dt>Interface supérieure</dt><dd>{recommendation.supportPlan.enabled ? `${recommendation.supportPlan.interfaceLayers} couches · ${fmt(recommendation.supportPlan.interfaceSpacing, 2)} mm` : "—"}</dd></div></dl></div>
           <div className="support-facts"><div><span>Contact plateau</span><b>{mesh ? `${fmt(mesh.baseScore)} / 100` : "—"}</b></div><div><span>Îlots</span><b>À valider au tranchage</b></div><div><span>Portée des ponts</span><b>Non mesurable sûrement depuis un STL seul</b></div></div><button className="secondary full" onClick={() => setTutorial("supports")}>Où régler les supports ?</button>
         </div></div>
         <section className="comparison-card"><div className="scope-head"><div><span>AVANT / APRÈS</span><h3>Choisis exactement ce que l’export modifie</h3></div><b>{effectiveSelectedDecisions.length} / 8 appliqués</b></div><p>{imported3mf ? "Valeurs actuelles lues dans le 3MF. Décoche une ligne pour conserver sa valeur et sa configuration existantes." : "Le STL ne contient aucun réglage. Les lignes cochées surchargent le profil officiel Creality Hi ; les autres restent au profil officiel."}</p><div className="comparison-table"><div className="comparison-head"><span>Réglage</span><span>Actuel</span><span>Conseillé</span><span>Export</span></div>{comparisonRows.map(row => <label key={row.id} className={`${effectiveSelectedDecisions.includes(row.id) ? "applied" : "preserved"}${row.disabled ? " decision-disabled" : ""}`}><b>{row.label}</b><span>{row.current}</span><strong>{row.recommended}</strong><span className="decision-toggle"><input type="checkbox" checked={effectiveSelectedDecisions.includes(row.id)} disabled={row.disabled} onChange={() => toggleDecision(row.id)}/><i></i>{row.disabled ? "Manuel" : effectiveSelectedDecisions.includes(row.id) ? "Appliquer" : "Conserver"}</span></label>)}</div>{experienceMode === "guided" && imported3mf && <small>Le mode Guidé masque les lignes déjà équivalentes. Passe en Expert pour tout voir.</small>}</section>
-        <section className="scope-card"><div className="scope-head"><div><span>PORTÉE DE L’EXPORT</span><h3>Ce que PrintPilot a décidé</h3></div><b>{effectiveSelectedDecisions.length} décisions</b></div><div className="scope-grid">{exportAudit.map(item => <div key={item.label}><span>{item.label}</span><b>{item.value}</b><small>{item.reason}</small></div>)}</div><details><summary>Réglages volontairement laissés intacts</summary><p><b>Tour de purge et CFS, purges, rétraction, ventilation, coutures, largeurs de ligne, plateau et ordre d’impression.</b> PrintPilot ne désactive donc pas une tour de purge simplement parce qu’elle semble inutile : ces paramètres restent ceux du 3MF importé ou du profil officiel. Les calibrations de la fiche bobine ne sont pas injectées automatiquement.</p></details></section>
-        <section className="estimate-card"><div><span>APRÈS TRANCHAGE DANS CREALITY PRINT</span><h3>Calculer le coût à partir des vraies valeurs</h3><p>Recopie la durée et la masse affichées après « Trancher le plateau ». Le STL seul ne permet pas une estimation fiable.</p></div><div className="slice-input-grid"><label><span>Heures</span><input inputMode="decimal" min="0" type="number" value={slicedHours} onChange={e => setSlicedHours(e.target.value)} placeholder="2"/></label><label><span>Minutes</span><input inputMode="decimal" min="0" max="59" type="number" value={slicedMinutes} onChange={e => setSlicedMinutes(e.target.value)} placeholder="35"/></label><label><span>Filament utilisé</span><div><input inputMode="decimal" min="0" type="number" value={slicedGrams} onChange={e => setSlicedGrams(e.target.value)} placeholder="84"/><em>g</em></div></label><label><span>Électricité</span><div><input inputMode="decimal" min="0" step="0.01" type="number" value={electricityPrice} onChange={e => setElectricityPrice(e.target.value)}/><em>€/kWh</em></div></label><label><span>Puissance moyenne</span><div><input inputMode="decimal" min="0" type="number" value={averagePower} onChange={e => setAveragePower(e.target.value)}/><em>W</em></div></label></div><div className="estimate-grid"><div><small>Matière</small><b>{slicedCost.materialCost == null ? "Prix/kg manquant" : `${fmt(slicedCost.materialCost, 2)} €`}</b></div><div><small>Électricité estimée</small><b>{slicedCost.energyCost == null ? "Durée manquante" : `${fmt(slicedCost.energyCost, 2)} €`}</b></div><div><small>Total direct</small><b>{slicedCost.totalCost == null ? "Données manquantes" : `${fmt(slicedCost.totalCost, 2)} €`}</b></div></div><p className="estimate-note">Matière = grammes tranchés × {filament.pricePerKg != null ? `${fmt(filament.pricePerKg, 2)} €/kg` : "prix/kg à renseigner dans la bobine"}. Électricité = durée × puissance moyenne × tarif. Le total n’inclut ni amortissement, ni maintenance, ni temps humain.</p></section>
+        <section className="scope-card"><div className="scope-head"><div><span>PORTÉE DE L’EXPORT</span><h3>Ce que PrintPilot a décidé</h3></div><b>{effectiveSelectedDecisions.length} décisions</b></div><div className="scope-grid">{exportAudit.map(item => <div key={item.label}><span>{item.label}</span><b>{item.value}</b><small>{item.reason}</small></div>)}</div><details><summary>Réglages volontairement laissés intacts</summary><p><b>Tour de purge et CFS, purges, rétraction, ventilation, coutures, largeurs de ligne, plateau et ordre d’impression.</b> PrintPilot ne désactive donc pas une tour de purge simplement parce qu’elle semble inutile : ces paramètres restent ceux du 3MF importé ou du profil officiel. Les calibrations de la fiche bobine ne sont pas injectées automatiquement.</p></details><details><summary>Sources et méthode de décision</summary><p>La base vient des <a href="https://github.com/CrealityOfficial/CrealityPrint/tree/master/resources/profiles/Creality/process" target="_blank" rel="noreferrer">profils officiels Creality Hi</a>. Les règles s’appuient sur les documentations <a href="https://wiki.creality.com/en/software/creality-print/parameter-tabs" target="_blank" rel="noreferrer">Creality Print</a>, <a href="https://www.orcaslicer.com/wiki/print_settings/others/others_settings_brim.html" target="_blank" rel="noreferrer">OrcaSlicer</a> et <a href="https://help.prusa3d.com/article/support-material_1698" target="_blank" rel="noreferrer">PrusaSlicer</a>. Une valeur incertaine est conservée, jamais inventée.</p></details></section>
         <section className="print-memory-card"><div><span>APRÈS L’IMPRESSION</span><h3>Noter le résultat</h3><p>{successfulWithFilament > 1 ? `${successfulWithFilament} impressions réussies sont enregistrées avec cette bobine.` : "Ces informations servent à ton historique et au dossier exporté."} Elles ne modifient jamais automatiquement les conseils ou les réglages.</p></div><div className="outcome-row">{([['success','Réussie'],['mixed','À améliorer'],['failed','Échec']] as const).map(([id, label]) => <button key={id} className={outcome === id ? `active ${id}` : ""} onClick={() => setOutcome(id)}>{label}</button>)}</div><div className="rating-row"><span>Qualité</span>{[1,2,3,4,5].map(value => <button key={value} className={qualityRating >= value ? "active" : ""} onClick={() => setQualityRating(value)}>★</button>)}</div><div className="memory-fields"><label><span>Défauts observés</span><input value={defects} onChange={event => setDefects(event.target.value)} placeholder="Stringing, warping, support difficile…"/></label><label><span>Notes</span><input value={printNotes} onChange={event => setPrintNotes(event.target.value)} placeholder="Ce que tu voudrais montrer à l’agent"/></label></div><button className="secondary" onClick={() => void savePrint()}>Enregistrer dans l’historique</button>{printStatus && <p className="form-message">{printStatus}</p>}</section>
         <section className="agent-exchange-card"><div className="scope-head"><div><span>DOSSIER POUR UN AGENT</span><h3>Exporte seulement ce dont tu as besoin</h3></div><b>100 % local</b></div><p>PrintPilot ne stocke aucun dossier supplémentaire. Télécharge les fichiers séparément, puis joins toi-même le JSON, le modèle et tes photos à l’agent de ton choix.</p><input ref={configInputRef} type="file" accept=".json,application/json" hidden onChange={importConfiguration}/><div className="exchange-actions"><button className="secondary" onClick={exportConfiguration}>Exporter la configuration JSON</button><button className="secondary" onClick={() => configInputRef.current?.click()}>Importer une configuration JSON</button><button className="secondary" disabled={!mesh} onClick={exportCurrentStl}>{imported3mf ? "Exporter un STL fusionné" : "Exporter le STL orienté"}</button>{imported3mf && <button className="secondary" onClick={exportOriginal3mf}>Réexporter le 3MF original</button>}</div><label className="prompt-preview"><span>Prompt préparé automatiquement</span><textarea readOnly rows={12} value={promptForAgent} onFocus={event => event.currentTarget.select()}/></label><button className="primary" onClick={() => void copyAgentPrompt()}>Copier le prompt</button>{exchangeStatus && <p className="exchange-status">{exchangeStatus}</p>}<small>Pour un diagnostic utile, joins au minimum le JSON et le modèle. Ajoute des photos nettes du défaut, une vue générale et, si nécessaire, une capture de l’aperçu du G-code.</small></section>
         <section className="export-card"><div><span>PROJET 3MF V7 · CONTRÔLÉ</span><h3>{imported3mf ? "Exporter le projet existant avec les choix appliqués" : "Exporter le STL avec les réglages appliqués"}</h3><p>{imported3mf && orientationId === "current" ? "La géométrie, les objets, les plateaux et tous les réglages non cochés du 3MF original sont conservés." : "Un nouveau projet Creality Hi est créé avec l’orientation affichée et uniquement les catégories cochées ci-dessus."}</p></div><button className="primary" onClick={exportProject} disabled={!mesh || nozzle !== "0.4"}>Vérifier et exporter le 3MF</button>{exportStatus && <p className="export-status">{exportStatus}</p>}{exportReceipt && <div className="export-receipt"><div><b>REÇU DU FICHIER</b><span>{exportReceipt.length} clés vérifiées dans l’archive téléchargée</span></div><ul>{exportReceipt.map(item => <li key={item.key}><code>{item.key}</code><span>{item.actual ?? "absent"}</span><b>{item.actual === item.expected && item.declared ? "✓ ÉCRITE" : "× ERREUR"}</b></li>)}</ul></div>}<small>Export ciblé : Creality Hi, buse 0,4 mm. Le fichier est rouvert localement avant téléchargement : chaque valeur doit être présente et déclarée dans <code>different_settings_to_system</code>. Vérifie ensuite le profil machine et l’aperçu couche par couche.</small></section>
