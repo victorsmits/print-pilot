@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useMemo, useRef, useState } from "react";
 import type { InventoryFilament } from "./PrintPilotClient";
 import type { InvoiceDraft } from "./invoiceImport";
 import type { InvoiceItemDraft } from "./invoiceParser";
+import { resolveBambuColorHex } from "./filamentColors";
 
 type Props = { inventory: InventoryFilament[]; loading: boolean; onReload: () => Promise<void>; onClose: () => void };
 type FormState = Record<string, string | boolean>;
@@ -58,7 +59,16 @@ export default function InventoryPanel({ inventory, loading, onReload, onClose }
   function resetFilters() { setQuery(""); setMaterialFilter("all"); setBrandFilter("all"); setStatusFilter("all"); setSortOrder("recent"); }
 
   function choose(row?: InventoryFilament) { setSelectedId(row?.dbId ?? null); setForm(formFrom(row)); setMessage(""); }
-  function set(key: string, value: string | boolean) { setForm(current => ({ ...current, [key]: value })); }
+  function set(key: string, value: string | boolean) {
+    setForm(current => {
+      const next = { ...current, [key]: value };
+      if (["brand", "productLine", "material", "colorName"].includes(key)) {
+        const knownColor = resolveBambuColorHex(next);
+        if (knownColor) next.colorHex = knownColor;
+      }
+      return next;
+    });
+  }
 
   async function importInvoice(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
