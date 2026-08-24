@@ -2,6 +2,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { filaments } from "../../../db/schema";
 import { getAuthenticatedUser } from "../../auth";
+import { resolveBambuColorHex } from "../../filamentColors";
 
 const LEGACY_DEMO_FILAMENTS = new Set([
   "PLA Basic|PLA|Noir|#171918", "PLA Basic|PLA|Blanc jade|#e8eee5", "PLA Basic|PLA|Beige|#d8c5a6",
@@ -52,7 +53,10 @@ export async function GET() {
       await db.delete(filaments).where(and(eq(filaments.userEmail, user.email), inArray(filaments.id, obsoleteDemoIds)));
       rows = await db.select().from(filaments).where(eq(filaments.userEmail, user.email)).orderBy(desc(filaments.updatedAt));
     }
-    return Response.json({ filaments: rows });
+    return Response.json({ filaments: rows.map(row => ({
+      ...row,
+      colorHex: row.colorHex || resolveBambuColorHex(row),
+    })) });
   } catch (error) {
     const status = error instanceof Error && error.message === "AUTH_REQUIRED" ? 401 : 500;
     return Response.json({ error: errorMessage(error) }, { status });
@@ -68,7 +72,7 @@ export async function POST(request: Request) {
     const now = new Date().toISOString(), db = await getDb();
     const [row] = await db.insert(filaments).values({
       userEmail: user.email, brand, productLine, material, colorName,
-      colorHex: String(data.colorHex ?? "").trim() || null, spoolWeightG: numberOrNull(data.spoolWeightG), remainingG: numberOrNull(data.remainingG), pricePerKg: numberOrNull(data.pricePerKg), lotNumber: String(data.lotNumber ?? "").trim() || null,
+      colorHex: String(data.colorHex ?? "").trim() || resolveBambuColorHex({ brand, productLine, material, colorName }), spoolWeightG: numberOrNull(data.spoolWeightG), remainingG: numberOrNull(data.remainingG), pricePerKg: numberOrNull(data.pricePerKg), lotNumber: String(data.lotNumber ?? "").trim() || null,
       supplier: String(data.supplier ?? "").trim() || null, purchaseDate: String(data.purchaseDate ?? "").trim() || null, invoiceNumber: String(data.invoiceNumber ?? "").trim() || null,
       purchaseTotal: numberOrNull(data.purchaseTotal), purchaseQuantity: numberOrNull(data.purchaseQuantity), cfsSlot: String(data.cfsSlot ?? "").trim() || null, nozzleDiameter: numberOrNull(data.nozzleDiameter), lastDriedAt: String(data.lastDriedAt ?? "").trim() || null,
       openedAt: String(data.openedAt ?? "").trim() || null, storageLocation: String(data.storageLocation ?? "").trim() || null, storageHumidity: numberOrNull(data.storageHumidity), profileName: String(data.profileName ?? "").trim() || null,
@@ -91,6 +95,9 @@ export async function PATCH(request: Request) {
     const editable = ["brand","productLine","material","colorName","colorHex","lotNumber","openedAt","storageLocation","profileName","notes","supplier","purchaseDate","invoiceNumber","cfsSlot","lastDriedAt"] as const;
     const update: Record<string, unknown> = { updatedAt: new Date().toISOString() };
     editable.forEach(key => { if (key in data) update[key] = String(data[key] ?? "").trim() || null; });
+    if (!String(data.colorHex ?? "").trim()) {
+      update.colorHex = resolveBambuColorHex(data);
+    }
     const numeric = ["spoolWeightG","remainingG","pricePerKg","storageHumidity","nozzleTempMin","nozzleTempMax","bedTempMin","bedTempMax","maxVolumetricSpeed","flowRatio","pressureAdvance","dryingTemp","dryingHours","purchaseTotal","purchaseQuantity","nozzleDiameter"] as const;
     numeric.forEach(key => { if (key in data) update[key] = numberOrNull(data[key]); });
     (["cfsCompatible","abrasive","calibrated"] as const).forEach(key => { if (key in data) update[key] = bool(data[key], false); });
